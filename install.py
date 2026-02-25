@@ -120,6 +120,50 @@ def show_recommendations():
     print("pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cu124")
     print("="*50 + "\n")
 
+def install_flash_attn(pip_base, env, dry_run=False):
+    import urllib.request
+    import re
+    
+    print("\n--- Installing flash-attn ---")
+    index_url = "https://pozzettiandrea.github.io/cuda-wheels/flash-attn/"
+    
+    try:
+        req = urllib.request.Request(index_url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req) as response:
+            html = response.read().decode('utf-8')
+    except Exception as e:
+        print(f"  Warning: Could not access flash-attn wheel index: {e}")
+        return False
+
+    cuda = env['cuda']
+    torch_tag = env['torch']
+    python_tag = env['python']
+    platform_tag = "linux_x86_64" if platform.system() != "Windows" else "win_amd64"
+    
+    # Match torch version with optional dot (e.g., torch25 or torch2.5)
+    # torch_tag is like 'torch25'
+    torch_base = torch_tag[:5] # 'torch'
+    torch_ver = torch_tag[5:] # '25'
+    torch_pattern = rf"{torch_base}{torch_ver[0]}\.?{torch_ver[1]}" # torch2\.?5
+    
+    # Regex to find the GitHub release URL for the matching wheel
+    pattern = rf'https://github\.com/[^"\s]+flash_attn-[^"\s]+\+{cuda}{torch_pattern}-{python_tag}-{python_tag}-{platform_tag}\.whl'
+    
+    matches = re.findall(pattern, html)
+    if matches:
+        wheel_url = matches[0]
+       
+        print(f"  Found matching wheel: {wheel_url}")
+        if dry_run:
+            print(f"  [Dry Run] Would run: {' '.join(pip_base + ['install', wheel_url])}")
+            return True
+        else:
+            return run_command(pip_base + ["install", wheel_url])
+    else:
+        print(f"  Warning: No matching flash-attn wheel found for {cuda}, {torch_tag}, {python_tag} on {platform_tag}.")
+        print("  Please consider switching to a recommended environment for flash-attn support.")
+        return False
+
 def install():
     parser = argparse.ArgumentParser(description="ComfyUI-Trellis2 Installation")
     parser.add_argument("--dry-run", action="store_true", help="Print the steps without installing")
@@ -139,22 +183,25 @@ def install():
     if not env['cuda']:
         print("Error: CUDA not detected in PyTorch. These wheels require CUDA.")
         sys.exit(1)
-
+    
+    # 1. Install standard requirements
     current_dir = os.path.dirname(os.path.abspath(__file__))
     requirements_path = os.path.join(current_dir, "requirements.txt")
     
     use_uv = is_uv_available()
     pip_base = [sys.executable, "-m", "uv", "pip"] if use_uv else [sys.executable, "-m", "pip"]
     
-    # Install requirements
     if os.path.exists(requirements_path):
         print(f"\nInstalling requirements from {requirements_path}...")
         if args.dry_run:
             print(f"  [Dry Run] Would run: {' '.join(pip_base + ['install', '-r', requirements_path])}")
         else:
             run_command(pip_base + ["install", "-r", requirements_path])
+
+    # 2. Install flash-attn from Pozzetti's wheels
+    install_flash_attn(pip_base, env, dry_run=args.dry_run)
     
-    # Define packages and their versions/naming
+    # 3. Define other CUDA wheels
     packages = [
         {"name": "cumesh", "tag": "cumesh-latest", "file": "cumesh", "version": "0.0.1", "linux_tag": "manylinux_2_35_x86_64"},
         {"name": "flex-gemm", "tag": "flex_gemm-latest", "file": "flex_gemm", "version": "1.0.0", "linux_tag": "manylinux_2_34_x86_64.manylinux_2_35_x86_64"},

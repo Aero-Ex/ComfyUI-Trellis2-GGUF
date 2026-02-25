@@ -362,7 +362,16 @@ class Trellis2LoadModel:
             
         dinov3_model_path = os.path.join(folder_paths.models_dir,"facebook","dinov3-vitl16-pretrain-lvd1689m","model.safetensors")
         if not os.path.exists(dinov3_model_path):
-            raise Exception("Facebook Dinov3 model not found in models/facebook/dinov3-vitl16-pretrain-lvd1689m folder")
+            print(f"Downloading DINOv3 model from Aero-Ex/Dinov3...")
+            from huggingface_hub import snapshot_download
+            snapshot_download(
+                repo_id="Aero-Ex/Dinov3",
+                local_dir=folder_paths.models_dir,
+                allow_patterns=["facebook/dinov3-vitl16-pretrain-lvd1689m/*"],
+                local_dir_use_symlinks=False,
+            )
+            if not os.path.exists(dinov3_model_path):
+                raise Exception("Failed to download Facebook Dinov3 model from Aero-Ex/Dinov3")
         
         trellis_image_large_path = os.path.join(folder_paths.models_dir,"microsoft","TRELLIS-image-large","ckpts","ss_dec_conv3d_16l8_fp16.safetensors")
         if not os.path.exists(trellis_image_large_path):
