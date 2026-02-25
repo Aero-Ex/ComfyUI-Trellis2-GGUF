@@ -1,6 +1,7 @@
 import os
 import torch
 import torchvision.transforms as transforms
+import psutil
 from PIL import Image, ImageSequence, ImageOps
 from pathlib import Path
 import numpy as np
@@ -320,6 +321,7 @@ class Trellis2LoadModel:
         return {
             "required": {
                 "modelname": (["TRELLIS.2-4B"],),
+                "model_format": (["Safetensors (FP16)", "GGUF Q8_0", "GGUF Q6_K", "GGUF Q5_K", "GGUF Q4_K"], {"default": "Safetensors (FP16)"}),
                 "backend": (["flash_attn","xformers"],{"default":"xformers"}),
                 "device": (["cpu","cuda"],{"default":"cuda"}),
                 "low_vram": ("BOOLEAN",{"default":True}),
@@ -333,7 +335,7 @@ class Trellis2LoadModel:
     CATEGORY = "Trellis2Wrapper"
     OUTPUT_NODE = True
 
-    def process(self, modelname, backend, device, low_vram, keep_models_loaded):
+    def process(self, modelname, model_format, backend, device, low_vram, keep_models_loaded):
         os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '1'
         os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"  # Can save GPU memory
         #os.environ["FLEX_GEMM_AUTOTUNE_CACHE_PATH"] = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'autotune_cache.json')
@@ -390,7 +392,16 @@ class Trellis2LoadModel:
             else:
                 raise Exception("Cannot download Trellis-Image-Large file ss_dec_conv3d_16l8_fp16.safetensors")
         
-        pipeline = Trellis2ImageTo3DPipeline.from_pretrained(model_path, keep_models_loaded = keep_models_loaded)
+       
+        enable_gguf = model_format.startswith("GGUF")
+        gguf_quant = model_format.split(" ")[1] if enable_gguf else "Q8_0"
+        pipeline = Trellis2ImageTo3DPipeline.from_pretrained(
+            model_path,
+            keep_models_loaded=keep_models_loaded,
+            enable_gguf=enable_gguf,
+            gguf_quant=gguf_quant,
+        )
+      
         pipeline.low_vram = low_vram
         
         if device=="cuda":
@@ -1809,10 +1820,21 @@ class Trellis2PostProcessAndUnWrapAndRasterizer:
         
         # Inpainting: fill gaps (dilation) to prevent black seams at UV boundaries
         mask_inv = (~mask).astype(np.uint8)
-        base_color = cv2.inpaint(base_color, mask_inv, 1, cv2.INPAINT_TELEA)
-        metallic = cv2.inpaint(metallic, mask_inv, 1, cv2.INPAINT_TELEA)[..., None]
-        roughness = cv2.inpaint(roughness, mask_inv, 1, cv2.INPAINT_TELEA)[..., None]
-        alpha = cv2.inpaint(alpha, mask_inv, 1, cv2.INPAINT_TELEA)[..., None]
+        
+        # Also inpaint interior black patches caused by mesh surface points landing in
+        # gaps between sparse texture voxels (grid_sample_3d returns zero at those spots).
+        # Detect zero-valued pixels within the mesh boundary and add them to the inpaint mask.
+        interior_black = (mask & (base_color.max(axis=-1) < 5)).astype(np.uint8)
+        combined_mask = np.maximum(mask_inv, interior_black)
+        
+        print(f"[Trellis2 Bake] Inpainting: {mask_inv.sum()} boundary pixels + "
+              f"{interior_black.sum()} interior black patches "
+              f"({interior_black.sum() * 100 / max(mask.sum(), 1):.1f}% of mesh surface)")
+        
+        base_color = cv2.inpaint(base_color, combined_mask, 3, cv2.INPAINT_TELEA)
+        metallic = cv2.inpaint(metallic, combined_mask, 3, cv2.INPAINT_TELEA)[..., None]
+        roughness = cv2.inpaint(roughness, combined_mask, 3, cv2.INPAINT_TELEA)[..., None]
+        alpha = cv2.inpaint(alpha, combined_mask, 3, cv2.INPAINT_TELEA)[..., None]
         
         # Create PBR material
         # Standard PBR packs Metallic and Roughness into Blue and Green channels
@@ -2039,8 +2061,14 @@ class Trellis2ReconstructMeshWithQuad:
         
         mesh_copy = copy.deepcopy(mesh)
         
-        vertices = mesh_copy.vertices.cuda()
-        faces = mesh_copy.faces.cuda()
+        vertices = mesh_copy.vertices.cuda().contiguous()
+        faces = mesh_copy.faces.cuda().contiguous()
+        
+        # Free as much GPU memory as possible before the memory-intensive quad reconstruction
+        import comfy.model_management as mm
+        mm.unload_all_models()
+        mm.soft_empty_cache()
+        torch.cuda.empty_cache()
         
         # Perform Dual Contouring remeshing (rebuilds topology)
         print('Reconstructing mesh ...')
@@ -2082,6 +2110,14 @@ class Trellis2MeshTexturing:
                 "use_custom_normals": ("BOOLEAN",{"default":False}),
                 "mesh_cluster_threshold_cone_half_angle_rad": ("FLOAT",{"default":60.0,"min":0.0,"max":359.9}),
             },
+            "optional": {
+                "use_tiled_encoder": ("BOOLEAN", {"default": False}),
+                "encoder_tile_size": ("INT", {"default": 512, "min": 32, "max": 1024}),
+                "encoder_overlap": ("INT", {"default": 24, "min": 0, "max": 256}),
+                "use_tiled_decoder_for_texture": ("BOOLEAN", {"default": False}),
+                "decoder_tile_size": ("INT", {"default": 120, "min": 32, "max": 1024}),
+                "decoder_overlap": ("INT", {"default": 48, "min": 0, "max": 256}),
+            }
         }
 
     RETURN_TYPES = ("TRIMESH","IMAGE","IMAGE",)
@@ -2090,7 +2126,7 @@ class Trellis2MeshTexturing:
     CATEGORY = "Trellis2Wrapper"
     OUTPUT_NODE = True
 
-    def process(self, pipeline, image, trimesh, seed, texture_steps, texture_guidance_strength, texture_guidance_rescale, texture_rescale_t, resolution, texture_size, texture_alpha_mode, double_side_material, texture_guidance_interval_start, texture_guidance_interval_end, max_views,bake_on_vertices,use_custom_normals,mesh_cluster_threshold_cone_half_angle_rad):
+    def process(self, pipeline, image, trimesh, seed, texture_steps, texture_guidance_strength, texture_guidance_rescale, texture_rescale_t, resolution, texture_size, texture_alpha_mode, double_side_material, texture_guidance_interval_start, texture_guidance_interval_end, max_views,bake_on_vertices,use_custom_normals,mesh_cluster_threshold_cone_half_angle_rad, use_tiled_encoder=False, encoder_tile_size=512, encoder_overlap=24, use_tiled_decoder_for_texture=False, decoder_tile_size=120, decoder_overlap=48):
         images = tensor_batch_to_pil_list(image, max_views=max_views)
         image_in = images[0] if len(images) == 1 else images
 
@@ -2111,7 +2147,13 @@ class Trellis2MeshTexturing:
             max_views = max_views,
             bake_on_vertices = bake_on_vertices,
             use_custom_normals = use_custom_normals,
-            mesh_cluster_threshold_cone_half_angle_rad = mesh_cluster_threshold_cone_half_angle_rad
+            mesh_cluster_threshold_cone_half_angle_rad = mesh_cluster_threshold_cone_half_angle_rad,
+            use_tiled_encoder=use_tiled_encoder,
+            encoder_tile_size=encoder_tile_size,
+            encoder_overlap=encoder_overlap,
+            use_tiled_decoder=use_tiled_decoder_for_texture,
+            decoder_tile_size=decoder_tile_size,
+            decoder_overlap=decoder_overlap
         )            
 
         baseColorTexture = pil2tensor(baseColorTexture_np)
@@ -2147,7 +2189,13 @@ class Trellis2MeshTexturingMultiView:
             "optional": {
                 "back_image": ("IMAGE",),
                 "left_image": ("IMAGE",),
-                "right_image": ("IMAGE",),                
+                "right_image": ("IMAGE",),
+                "use_tiled_encoder": ("BOOLEAN", {"default": False}),
+                "encoder_tile_size": ("INT", {"default": 512, "min": 32, "max": 1024}),
+                "encoder_overlap": ("INT", {"default": 24, "min": 0, "max": 256}),
+                "use_tiled_decoder_for_texture": ("BOOLEAN", {"default": False}),
+                "decoder_tile_size": ("INT", {"default": 120, "min": 32, "max": 1024}),
+                "decoder_overlap": ("INT", {"default": 48, "min": 0, "max": 256}),
             }
         }
 
@@ -2179,7 +2227,13 @@ class Trellis2MeshTexturingMultiView:
         blend_temperature,
         back_image = None,
         left_image = None,
-        right_image = None):
+        right_image = None,
+        use_tiled_encoder=False, 
+        encoder_tile_size=512, 
+        encoder_overlap=24,
+        use_tiled_decoder_for_texture=False,
+        decoder_tile_size=120,
+        decoder_overlap=48):
         
         reset_cuda()
         
@@ -2210,7 +2264,13 @@ class Trellis2MeshTexturingMultiView:
             use_custom_normals = use_custom_normals,
             mesh_cluster_threshold_cone_half_angle_rad = mesh_cluster_threshold_cone_half_angle_rad,
             front_axis = front_axis,
-            blend_temperature = blend_temperature
+            blend_temperature = blend_temperature,
+            use_tiled_encoder=use_tiled_encoder,
+            encoder_tile_size=encoder_tile_size,
+            encoder_overlap=encoder_overlap,
+            use_tiled_decoder=use_tiled_decoder_for_texture,
+            decoder_tile_size=decoder_tile_size,
+            decoder_overlap=decoder_overlap
         )            
 
         baseColorTexture = pil2tensor(baseColorTexture_np)
@@ -2357,6 +2417,15 @@ class Trellis2MeshRefiner:
                 "use_tiled_decoder": ("BOOLEAN", {"default":True}),
                 "max_views": ("INT", {"default": 4, "min": 1, "max": 16}),
             },
+            "optional": {
+                "use_tiled_encoder": ("BOOLEAN", {"default": False}),
+                "encoder_tile_size": ("INT", {"default": 512, "min": 32, "max": 1024}),
+                "encoder_overlap": ("INT", {"default": 24, "min": 0, "max": 256}),
+                "use_tiled_decoder_for_texture": ("BOOLEAN", {"default": False}),
+                "use_tiled_upsample": ("BOOLEAN", {"default": True}),
+                "upsample_tile_size": ("INT", {"default": 16, "min": 4, "max": 128}),
+                "upsample_overlap": ("INT", {"default": 2, "min": 0, "max": 16}),
+            }
         }
 
     RETURN_TYPES = ("MESHWITHVOXEL", "BVH", )
@@ -2382,7 +2451,14 @@ class Trellis2MeshRefiner:
         texture_guidance_interval_start,
         texture_guidance_interval_end,
         use_tiled_decoder,
-        max_views):
+        max_views,
+        use_tiled_encoder=False, 
+        encoder_tile_size=512, 
+        encoder_overlap=24,
+        use_tiled_decoder_for_texture=False,
+        use_tiled_upsample=True,
+        upsample_tile_size=16,
+        upsample_overlap=2):
 
         reset_cuda()
 
@@ -2395,7 +2471,7 @@ class Trellis2MeshRefiner:
         shape_slat_sampler_params = {"steps":shape_steps,"guidance_strength":shape_guidance_strength,"guidance_rescale":shape_guidance_rescale,"guidance_interval":shape_guidance_interval,"rescale_t":shape_rescale_t}       
         tex_slat_sampler_params = {"steps":texture_steps,"guidance_strength":texture_guidance_strength,"guidance_rescale":texture_guidance_rescale,"guidance_interval":texture_guidance_interval,"rescale_t":texture_rescale_t}
         
-        mesh = pipeline.refine_mesh(mesh = trimesh, image=image_in, seed=seed, shape_slat_sampler_params = shape_slat_sampler_params, tex_slat_sampler_params = tex_slat_sampler_params, resolution = resolution, max_num_tokens = max_num_tokens, generate_texture_slat=generate_texture_slat, downsampling=downsampling, use_tiled=use_tiled_decoder, max_views = max_views)[0]         
+        mesh = pipeline.refine_mesh(mesh = trimesh, image=image_in, seed=seed, shape_slat_sampler_params = shape_slat_sampler_params, tex_slat_sampler_params = tex_slat_sampler_params, resolution = resolution, max_num_tokens = max_num_tokens, generate_texture_slat=generate_texture_slat, downsampling=downsampling, use_tiled=use_tiled_decoder, max_views = max_views, use_tiled_encoder=use_tiled_encoder, encoder_tile_size=encoder_tile_size, encoder_overlap=encoder_overlap, use_tiled_upsample=use_tiled_upsample, upsample_tile_size=upsample_tile_size, upsample_overlap=upsample_overlap)[0]         
         
         vertices = mesh.vertices.cuda()
         faces = mesh.faces.cuda()        

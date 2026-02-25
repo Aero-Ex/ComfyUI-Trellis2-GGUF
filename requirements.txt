@@ -1,3 +1,4 @@
+gguf
 meshlib
 requests
 pymeshlab

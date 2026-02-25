@@ -21,9 +21,9 @@ class SparseDownsample(nn.Module):
         assert self.mode in ['mean', 'max'], f'Invalid mode: {self.mode}'
 
     def forward(self, x: SparseTensor) -> SparseTensor:
+        DIM = x.coords.shape[-1] - 1
         cache = x.get_spatial_cache(f'downsample_{self.factor}')
         if cache is None:
-            DIM = x.coords.shape[-1] - 1
 
             coord = list(x.coords.unbind(dim=-1))
             for i in range(DIM):
@@ -58,12 +58,11 @@ class SparseDownsample(nn.Module):
             x.register_spatial_cache(f'downsample_{self.factor}', (new_coords, idx))
             out.register_spatial_cache(f'upsample_{self.factor}', (x.coords, idx))
             out.register_spatial_cache(f'shape', torch.Size(MAX))
-            if self.training:
-                subidx = x.coords[:, 1:] % self.factor
-                subidx = sum([subidx[..., i] * self.factor ** i for i in range(DIM)])
-                subdivision = torch.zeros((new_coords.shape[0], self.factor ** DIM), device=x.device, dtype=torch.bool)
-                subdivision[idx, subidx] = True
-                out.register_spatial_cache(f'subdivision', subdivision)
+            subidx = x.coords[:, 1:] % self.factor
+            subidx = sum([subidx[..., i] * self.factor ** i for i in range(DIM)])
+            subdivision = torch.zeros((new_coords.shape[0], self.factor ** DIM), device=x.device, dtype=torch.bool)
+            subdivision[idx, subidx] = True
+            out.register_spatial_cache(f'subdivision', subdivision)
 
         return out
 
@@ -101,7 +100,8 @@ class SparseUpsample(nn.Module):
             
         new_feats = x.feats[idx]
         out = SparseTensor(new_feats, new_coords, x._shape)
-        out._scale = tuple([s / self.factor for s in x._scale])
+        from fractions import Fraction
+        out._scale = tuple([s * Fraction(1, self.factor) for s in x._scale])
         if cache is not None:           # only keep cache when subdiv following it
             out._spatial_cache = x._spatial_cache
         

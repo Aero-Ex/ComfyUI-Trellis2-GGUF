@@ -30,7 +30,7 @@ Documentation = "https://github.com/visualbruno/ComfyUI-Trellis2/wiki"
 
 [tool.comfy]
 PublisherId = "visualbruno"
-DisplayName = "ComfyUI-Trellis2"
+DisplayName = "ComfyUI-Trellis2-GGUF"
 Icon = ""
 includes = [] 
 # "requires-comfyui" = ">=1.0.0"  # ComfyUI version compatibility

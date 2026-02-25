@@ -413,7 +413,7 @@ class SparseTensor(VarLenTensor):
             self.data = data
 
         self._shape = shape
-        self._scale = kwargs.get('scale', (Fraction(1, 1), Fraction(1, 1), Fraction(1, 1)))
+        self._scale = tuple(Fraction(s) if not isinstance(s, Fraction) else s for s in kwargs.get('scale', (Fraction(1, 1), Fraction(1, 1), Fraction(1, 1))))
         self._spatial_cache = kwargs.get('spatial_cache', {})
 
         if config.DEBUG:
@@ -769,6 +769,18 @@ class SparseTensor(VarLenTensor):
         Clear all spatial caches.
         """
         self._spatial_cache = {}
+
+    def clear_neighbor_cache(self) -> None:
+        """
+        Clear only flex_gemm neighbor caches to reclaim VRAM.
+        Essential for low_vram mode during tiled decoding.
+        """
+        for scale_key in list(self._spatial_cache.keys()):
+            scale_cache = self._spatial_cache[scale_key]
+            if isinstance(scale_cache, dict):
+                for k in list(scale_cache.keys()):
+                    if 'neighbor_cache' in str(k):
+                        del scale_cache[k]
 
     def register_spatial_cache(self, key, value) -> None:
         """

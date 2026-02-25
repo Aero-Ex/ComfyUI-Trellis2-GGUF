@@ -47,10 +47,9 @@ class SparseSpatial2Channel(nn.Module):
             x.register_spatial_cache(f'spatial2channel_{self.factor}', (new_coords, idx, subidx))
             out.register_spatial_cache(f'channel2spatial_{self.factor}', (x.coords, idx, subidx))
             out.register_spatial_cache(f'shape', torch.Size(MAX))
-            if self.training:
-                subdivision = torch.zeros((new_coords.shape[0], self.factor ** DIM), device=x.device, dtype=torch.bool)
-                subdivision[idx, subidx] = True
-                out.register_spatial_cache(f'subdivision', subdivision)
+            subdivision = torch.zeros((new_coords.shape[0], self.factor ** DIM), device=x.device, dtype=torch.bool)
+            subdivision[idx, subidx] = True
+            out.register_spatial_cache(f'subdivision', subdivision)
                 
         return out
 
@@ -83,11 +82,48 @@ class SparseChannel2Spatial(nn.Module):
                 idx = torch.repeat_interleave(torch.arange(x.coords.shape[0], device=x.device), N_leaf, dim=0, output_size=subidx.shape[0])
         else:
             new_coords, idx, subidx = cache
+            # When tiled decoding, x is a tile subset with fewer voxels than
+            # the full set the cache was built for. Remap idx from global to
+            # local tile indices.
+            N_cache = idx.max().item() + 1 if idx.numel() > 0 else 0
+            if N_cache != x.coords.shape[0]:
+                # 1. Spatial filter: quickly subset cache to tile's bounding box.
+                # High-res voxels belonging to these latent voxels are strictly within:
+                # [lat_min * factor, (lat_max + 1) * factor)
+                c_xyz = x.coords[:, 1:]
+                c_min = c_xyz.min(dim=0).values
+                c_max = c_xyz.max(dim=0).values
+                m_spatial = torch.all(
+                    (new_coords[:, 1:] >= c_min * self.factor) &
+                    (new_coords[:, 1:] < (c_max + 1) * self.factor),
+                    dim=1
+                )
+                new_coords = new_coords[m_spatial]
+                idx = idx[m_spatial]
+                subidx = subidx[m_spatial]
+
+                # 2. Coordinate matching: re-identify local indices in x.
+                # Now running on a significantly smaller subset.
+                stride = torch.tensor([1024**3, 1024**2, 1024, 1], device=x.device, dtype=torch.int64)
+                x_keys = (x.coords.long() * stride).sum(dim=1)
+                x_so = torch.argsort(x_keys)
+                x_ks = x_keys[x_so]
+                # Compute parent keys for remaining high-res voxels
+                pk = new_coords[:, 0].long() * stride[0] + \
+                     (new_coords[:, 1:] // self.factor).long().mul(stride[1:]).sum(dim=1)
+                # Lookup
+                pos = torch.searchsorted(x_ks, pk)
+                pos_c = pos.clamp(0, x_ks.shape[0] - 1)
+                match = x_ks[pos_c] == pk
+                # Filter and assign local idx
+                new_coords = new_coords[match]
+                subidx = subidx[match]
+                idx = x_so[pos_c[match]]  # maps to x.feats[idx] locally
 
         x_feats = x.feats.reshape(x.feats.shape[0] * self.factor ** DIM, -1)
         new_feats = x_feats[idx * self.factor ** DIM + subidx]
         out = SparseTensor(new_feats, new_coords, None if x._shape is None else torch.Size([x._shape[0], x._shape[1] // self.factor ** DIM]))
-        out._scale = tuple([s / self.factor for s in x._scale])
-        if cache is not None:           # only keep cache when subdiv following it
-            out._spatial_cache = x._spatial_cache
+        from fractions import Fraction
+        out._scale = tuple([s * Fraction(1, self.factor) for s in x._scale])
+        out._spatial_cache = x._spatial_cache
         return out

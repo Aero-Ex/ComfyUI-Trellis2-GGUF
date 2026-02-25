@@ -132,8 +132,21 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             torch.cuda.synchronize()
             torch.cuda.empty_cache()
 
+    def move_all_to_cpu(self):
+        """Move all models in the pipeline to CPU."""
+        print("[Trellis2] Offloading all models to CPU...")
+        for name, model in self.models.items():
+            if model is not None:
+                model.cpu()
+        if self.image_cond_model is not None:
+            self.image_cond_model.cpu()
+        if self.rembg_model is not None:
+            self.rembg_model.cpu()
+        self._cleanup_cuda()
+
     @classmethod
-    def from_pretrained(cls, path: str, config_file: str = "pipeline.json", keep_models_loaded = True) -> "Trellis2ImageTo3DPipeline":
+    def from_pretrained(cls, path: str, config_file: str = "pipeline.json", keep_models_loaded = True,
+                        enable_gguf: bool = False, gguf_quant: str = "Q8_0") -> "Trellis2ImageTo3DPipeline":
         """
         Load a pretrained model.
 
@@ -173,6 +186,8 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         pipeline.path = path
         pipeline.keep_models_loaded = keep_models_loaded
         pipeline.last_processing = ''
+        pipeline.enable_gguf = enable_gguf
+        pipeline.gguf_quant = gguf_quant
         
         pipeline._pretrained_args['models']['sparse_structure_decoder'] = os.path.join(folder_paths.models_dir,"microsoft","TRELLIS-image-large","ckpts","ss_dec_conv3d_16l8_fp16")
         facebook_model_path = os.path.join(folder_paths.models_dir,"facebook","dinov3-vitl16-pretrain-lvd1689m")
@@ -183,7 +198,11 @@ class Trellis2ImageTo3DPipeline(Pipeline):
     def load_sparse_structure_model(self):        
         if self.models['sparse_structure_flow_model'] is None:
             print('Loading Sparse Structure model ...')
-            self.models['sparse_structure_flow_model'] = models.from_pretrained(f"{self.path}/{self._pretrained_args['models']['sparse_structure_flow_model']}")
+            self.models['sparse_structure_flow_model'] = models.from_pretrained(
+                f"{self.path}/{self._pretrained_args['models']['sparse_structure_flow_model']}",
+                enable_gguf=getattr(self, 'enable_gguf', False),
+                gguf_quant=getattr(self, 'gguf_quant', 'Q8_0')
+            )
             self.models['sparse_structure_flow_model'].eval()
             self.models['sparse_structure_flow_model'].to(self._device)
         
@@ -220,7 +239,11 @@ class Trellis2ImageTo3DPipeline(Pipeline):
     def load_shape_slat_flow_model_512(self):        
         if self.models['shape_slat_flow_model_512'] is None:
             print('Loading Shape Slat Flow 512 model ...')
-            self.models['shape_slat_flow_model_512'] = models.from_pretrained(f"{self.path}/{self._pretrained_args['models']['shape_slat_flow_model_512']}")
+            self.models['shape_slat_flow_model_512'] = models.from_pretrained(
+                f"{self.path}/{self._pretrained_args['models']['shape_slat_flow_model_512']}",
+                enable_gguf=getattr(self, 'enable_gguf', False),
+                gguf_quant=getattr(self, 'gguf_quant', 'Q8_0')
+            )
             self.models['shape_slat_flow_model_512'].eval()
             self.models['shape_slat_flow_model_512'].to(self._device)
             
@@ -233,7 +256,11 @@ class Trellis2ImageTo3DPipeline(Pipeline):
     def load_tex_slat_flow_model_512(self):        
         if self.models['tex_slat_flow_model_512'] is None:
             print('Loading Texture Slat Flow 512 model ...')
-            self.models['tex_slat_flow_model_512'] = models.from_pretrained(f"{self.path}/{self._pretrained_args['models']['tex_slat_flow_model_512']}")
+            self.models['tex_slat_flow_model_512'] = models.from_pretrained(
+                f"{self.path}/{self._pretrained_args['models']['tex_slat_flow_model_512']}",
+                enable_gguf=getattr(self, 'enable_gguf', False),
+                gguf_quant=getattr(self, 'gguf_quant', 'Q8_0')
+            )
             self.models['tex_slat_flow_model_512'].eval()
             self.models['tex_slat_flow_model_512'].to(self._device)          
 
@@ -276,7 +303,11 @@ class Trellis2ImageTo3DPipeline(Pipeline):
     def load_shape_slat_flow_model_1024(self):        
         if self.models['shape_slat_flow_model_1024'] is None:
             print('Loading Shape Slat Flow 1024 model ...')
-            self.models['shape_slat_flow_model_1024'] = models.from_pretrained(f"{self.path}/{self._pretrained_args['models']['shape_slat_flow_model_1024']}")
+            self.models['shape_slat_flow_model_1024'] = models.from_pretrained(
+                f"{self.path}/{self._pretrained_args['models']['shape_slat_flow_model_1024']}",
+                enable_gguf=getattr(self, 'enable_gguf', False),
+                gguf_quant=getattr(self, 'gguf_quant', 'Q8_0')
+            )
             self.models['shape_slat_flow_model_1024'].eval()
             self.models['shape_slat_flow_model_1024'].to(self._device)           
 
@@ -289,7 +320,11 @@ class Trellis2ImageTo3DPipeline(Pipeline):
     def load_tex_slat_flow_model_1024(self):        
         if self.models['tex_slat_flow_model_1024'] is None:
             print('Loading Texture Slat Flow 1024 model ...')
-            self.models['tex_slat_flow_model_1024'] = models.from_pretrained(f"{self.path}/{self._pretrained_args['models']['tex_slat_flow_model_1024']}")
+            self.models['tex_slat_flow_model_1024'] = models.from_pretrained(
+                f"{self.path}/{self._pretrained_args['models']['tex_slat_flow_model_1024']}",
+                enable_gguf=getattr(self, 'enable_gguf', False),
+                gguf_quant=getattr(self, 'gguf_quant', 'Q8_0')
+            )
             self.models['tex_slat_flow_model_1024'].eval()
             self.models['tex_slat_flow_model_1024'].to(self._device)                   
 
@@ -756,13 +791,9 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             self._cleanup_cuda()                         
         return slat
 
-    def decode_tex_slat(
-        self,
-        slat: SparseTensor,
-        subs: List[SparseTensor] = None,
-    ) -> SparseTensor:
+    def decode_tex_slat(self, slat: SparseTensor, subs: torch.Tensor = None) -> SparseTensor:
         """
-        Decode the structured latent.
+        Decode the structured latent to texture voxels.
 
         Args:
             slat (SparseTensor): The structured latent.
@@ -770,6 +801,8 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         Returns:
             SparseTensor: The decoded texture voxels
         """
+        # Comprehensive offload to ensure maximum VRAM for decoder
+        self.move_all_to_cpu()
         
         self.load_tex_slat_decoder()
         
@@ -778,10 +811,20 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             self.models['tex_slat_decoder'].low_vram = True                                               
             
         if subs is None:
-            ret = self.models['tex_slat_decoder'](slat) * 0.5 + 0.5
+            if getattr(self, 'use_tiled_decoder_for_texture', False):
+                tile_overlap = getattr(self, 'tiled_decoder_overlap', 48)
+                tile_size = getattr(self, 'tiled_decoder_size', 120)
+                ret = self.models['tex_slat_decoder']._tiled_forward(slat, tile_size=tile_size, overlap=tile_overlap) * 0.5 + 0.5
+            else:
+                ret = self.models['tex_slat_decoder'](slat) * 0.5 + 0.5
         else:
             slat.clear_spatial_cache()
-            ret = self.models['tex_slat_decoder'](slat, guide_subs=subs) * 0.5 + 0.5
+            if getattr(self, 'use_tiled_decoder_for_texture', False):
+                tile_overlap = getattr(self, 'tiled_decoder_overlap', 48)
+                tile_size = getattr(self, 'tiled_decoder_size', 120)
+                ret = self.models['tex_slat_decoder']._tiled_forward(slat, guide_subs=subs, tile_size=tile_size, overlap=tile_overlap) * 0.5 + 0.5
+            else:
+                ret = self.models['tex_slat_decoder'](slat, guide_subs=subs) * 0.5 + 0.5
             
         if self.low_vram:
             self.models['tex_slat_decoder'].cpu()
@@ -1717,6 +1760,9 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         self,
         mesh: trimesh.Trimesh,
         resolution: int = 1024,
+        use_tiled_encoder: bool = False,
+        encoder_tile_size: int = 512,
+        encoder_overlap: int = 24,
     ) -> SparseTensor:
         """
         Encode the meshes to structured latent.
@@ -1724,6 +1770,9 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         Args:
             mesh (trimesh.Trimesh): The mesh to encode.
             resolution (int): The resolution of mesh
+            use_tiled_encoder (bool): Whether to use spatial chunking during encoding to save VRAM.
+            encoder_tile_size (int): The size of the spatial chunks.
+            encoder_overlap (int): The overlap between spatial chunks.
         
         Returns:
             SparseTensor: The encoded structured latent.
@@ -1752,7 +1801,17 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             
         if self.low_vram:
             self.models['shape_slat_encoder'].to(self.device)
-        shape_slat = self.models['shape_slat_encoder'](vertices, intersected)
+            
+        if use_tiled_encoder:
+            print(f"Encoding shape slat with tiles (size: {encoder_tile_size}, overlap: {encoder_overlap})...")
+            
+        shape_slat = self.models['shape_slat_encoder'](
+            vertices, intersected, 
+            use_tiled=use_tiled_encoder, 
+            tile_size=encoder_tile_size, 
+            overlap=encoder_overlap
+        )
+        
         if self.low_vram:
             self.models['shape_slat_encoder'].cpu()
             
@@ -1784,6 +1843,11 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             uvs[:, 1] = 1 - uvs[:, 1]
             uvs_torch = torch.from_numpy(uvs).float().cuda()
         else:
+            if self.low_vram:
+                print("[Trellis2] Low VRAM: Offloading voxel grid to CPU for mesh unwrapping...")
+                pbr_voxel = pbr_voxel.cpu()
+                self._cleanup_cuda()
+
             _cumesh = cumesh.CuMesh()
             _cumesh.init(vertices_torch, faces_torch)
             print('Unwrapping mesh ...')
@@ -1800,6 +1864,11 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             
             del _cumesh
             gc.collect()      
+
+            if self.low_vram:
+                print("[Trellis2] Low VRAM: Moving voxel grid back to GPU...")
+                pbr_voxel = pbr_voxel.to(self.device)
+                self._cleanup_cuda()
             
             vertices_torch = vertices_torch.cuda()
             faces_torch = faces_torch.cuda()
@@ -2000,8 +2069,19 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         max_views = 4,
         bake_on_vertices = False,
         use_custom_normals = False,
-        mesh_cluster_threshold_cone_half_angle_rad=60.0
+        mesh_cluster_threshold_cone_half_angle_rad=60.0,
+        use_tiled_encoder: bool = False,
+        encoder_tile_size: int = 512,
+        encoder_overlap: int = 24,
+        use_tiled_decoder: bool = False,
+        decoder_tile_size: int = 120,
+        decoder_overlap: int = 48,
     ):
+        
+        self.use_tiled_decoder_for_texture = use_tiled_decoder
+        self.tiled_decoder_size = decoder_tile_size
+        self.tiled_decoder_overlap = decoder_overlap
+        
         mesh = self.preprocess_mesh(mesh)
         seed_all(seed)
         
@@ -2021,7 +2101,13 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         if not self.keep_models_loaded:
             self.unload_image_cond_model()
         
-        shape_slat = self.encode_shape_slat(mesh, resolution)
+        shape_slat = self.encode_shape_slat(
+            mesh, 
+            resolution,
+            use_tiled_encoder=use_tiled_encoder,
+            encoder_tile_size=encoder_tile_size,
+            encoder_overlap=encoder_overlap
+        )
         
         if resolution==512:
             self.unload_tex_slat_flow_model_1024()
@@ -2046,7 +2132,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             )
             
             if not self.keep_models_loaded:
-                self.unload_shape_slat_flow_model_1024()
+                self.unload_tex_slat_flow_model_1024()
 
         torch.cuda.empty_cache()
         pbr_voxel = self.decode_tex_slat(tex_slat)
@@ -2074,7 +2160,18 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         mesh_cluster_threshold_cone_half_angle_rad=60.0,
         front_axis: str = 'z',
         blend_temperature: float = 2.0,
+        use_tiled_encoder: bool = False,
+        encoder_tile_size: int = 512,
+        encoder_overlap: int = 24,
+        use_tiled_decoder: bool = False,
+        decoder_tile_size: int = 120,
+        decoder_overlap: int = 48,
     ):
+        
+        self.use_tiled_decoder_for_texture = use_tiled_decoder
+        self.tiled_decoder_size = decoder_tile_size
+        self.tiled_decoder_overlap = decoder_overlap
+        
         mesh = self.preprocess_mesh(mesh)
         seed_all(seed)
         
@@ -2105,7 +2202,13 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         if not self.keep_models_loaded:
             self.unload_image_cond_model()
         
-        shape_slat = self.encode_shape_slat(mesh, resolution)
+        shape_slat = self.encode_shape_slat(
+            mesh, 
+            resolution,
+            use_tiled_encoder=use_tiled_encoder,
+            encoder_tile_size=encoder_tile_size,
+            encoder_overlap=encoder_overlap
+        )
         
         if resolution==512:
             self.unload_tex_slat_flow_model_1024()
@@ -2138,7 +2241,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             )                          
             
             if not self.keep_models_loaded:
-                self.unload_shape_slat_flow_model_1024()
+                self.unload_tex_slat_flow_model_1024()
                 
         torch.cuda.empty_cache()
         pbr_voxel = self.decode_tex_slat(tex_slat)
@@ -2184,6 +2287,9 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         sampler_params: dict = {},
         max_num_tokens: int = 49152,
         downsampling = 16,
+        use_tiled_upsample: bool = False,
+        upsample_tile_size: int = 16,
+        upsample_overlap: int = 2,
     ) -> SparseTensor:
         # Upsample       
         self.load_shape_slat_decoder()
@@ -2191,7 +2297,14 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         if self.low_vram:
             self.models['shape_slat_decoder'].to(self.device)
             self.models['shape_slat_decoder'].low_vram = True
-        hr_coords = self.models['shape_slat_decoder'].upsample(mesh_slat, upsample_times=4)
+        decoder = self.models['shape_slat_decoder']
+        if use_tiled_upsample:
+            print(f'[Trellis2] Tiled upsample (tile={upsample_tile_size}, overlap={upsample_overlap}) ...')
+            hr_coords = decoder._tiled_upsample(mesh_slat, upsample_times=4,
+                                                tile_size=upsample_tile_size,
+                                                overlap=upsample_overlap)
+        else:
+            hr_coords = decoder.upsample(mesh_slat, upsample_times=4)
         if self.low_vram:
             self.models['shape_slat_decoder'].cpu()
             self.models['shape_slat_decoder'].low_vram = False
@@ -2275,7 +2388,19 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         downsampling = 16,
         use_tiled: bool = True,
         max_views: int = 4,
+        use_tiled_encoder: bool = False,
+        encoder_tile_size: int = 512,
+        encoder_overlap: int = 24,
+        use_tiled_decoder: bool = False,
+        decoder_tile_size: int = 120,
+        decoder_overlap: int = 48,
+        use_tiled_upsample: bool = False,
+        upsample_tile_size: int = 16,
+        upsample_overlap: int = 2,
     ):
+        self.use_tiled_decoder_for_texture = use_tiled_decoder
+        self.tiled_decoder_size = decoder_tile_size
+        self.tiled_decoder_overlap = decoder_overlap
         mesh = self.preprocess_mesh(mesh)
         seed_all(seed)
         
@@ -2294,7 +2419,13 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         if not self.keep_models_loaded:
             self.unload_image_cond_model()        
         
-        mesh_slat = self.encode_shape_slat(mesh, resolution)
+        mesh_slat = self.encode_shape_slat(
+            mesh, 
+            resolution,
+            use_tiled_encoder=use_tiled_encoder,
+            encoder_tile_size=encoder_tile_size,
+            encoder_overlap=encoder_overlap
+        )
         
         if resolution==512:
             self.unload_shape_slat_flow_model_1024()
@@ -2306,7 +2437,10 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 512,
                 shape_slat_sampler_params,
                 max_num_tokens,
-                downsampling
+                downsampling,
+                use_tiled_upsample=use_tiled_upsample,
+                upsample_tile_size=upsample_tile_size,
+                upsample_overlap=upsample_overlap,
             )
             
             if not self.keep_models_loaded:
@@ -2332,7 +2466,10 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 1024,
                 shape_slat_sampler_params,
                 max_num_tokens,
-                downsampling
+                downsampling,
+                use_tiled_upsample=use_tiled_upsample,
+                upsample_tile_size=upsample_tile_size,
+                upsample_overlap=upsample_overlap,
             )
             
             if not self.keep_models_loaded:
@@ -2358,7 +2495,10 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 1536,
                 shape_slat_sampler_params,
                 max_num_tokens,
-                downsampling
+                downsampling,
+                use_tiled_upsample=use_tiled_upsample,
+                upsample_tile_size=upsample_tile_size,
+                upsample_overlap=upsample_overlap,
             )
             
             if not self.keep_models_loaded:
