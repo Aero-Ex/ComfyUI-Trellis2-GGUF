@@ -2001,7 +2001,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             shape=torch.Size([*pbr_voxel.shape, *pbr_voxel.spatial_shape]),
             grid=((pos[mask] + 0.5) * resolution).reshape(1, -1, 3),
             mode='trilinear',
-        )
+        ).float()
         
         torch.cuda.synchronize()
         
