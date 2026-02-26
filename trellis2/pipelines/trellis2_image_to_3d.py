@@ -98,6 +98,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         self.rembg_model = rembg_model
         self._low_vram = low_vram
         self.default_pipeline_type = default_pipeline_type
+        self.precision = None
         self.pbr_attr_layout = {
             'base_color': slice(0, 3),
             'metallic': slice(3, 4),
@@ -146,7 +147,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
 
     @classmethod
     def from_pretrained(cls, path: str, config_file: str = "pipeline.json", keep_models_loaded = True,
-                        enable_gguf: bool = False, gguf_quant: str = "Q8_0") -> "Trellis2ImageTo3DPipeline":
+                        enable_gguf: bool = False, gguf_quant: str = "Q8_0", precision: str = None) -> "Trellis2ImageTo3DPipeline":
         """
         Load a pretrained model.
 
@@ -188,10 +189,14 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         pipeline.last_processing = ''
         pipeline.enable_gguf = enable_gguf
         pipeline.gguf_quant = gguf_quant
+        pipeline.precision = precision
         
-        pipeline._pretrained_args['models']['sparse_structure_decoder'] = os.path.join(folder_paths.models_dir,"microsoft","TRELLIS-image-large","ckpts","ss_dec_conv3d_16l8_fp16")
-        facebook_model_path = os.path.join(folder_paths.models_dir,"facebook","dinov3-vitl16-pretrain-lvd1689m")
-        pipeline._pretrained_args['image_cond_model']['args']['model_name'] = facebook_model_path           
+        pipeline._pretrained_args['models']['sparse_structure_decoder'] = os.path.join(folder_paths.models_dir,"Trellis2","decoders","Stage1","ss_dec_conv3d_16l8_fp16")
+        # Check both the new consolidated location and the old legacy location for DINOv3
+        dinov3_new = os.path.join(folder_paths.models_dir,"Trellis2","dinov3","facebook","dinov3-vitl16-pretrain-lvd1689m")
+        dinov3_old = os.path.join(folder_paths.models_dir,"Aero-Ex","Dinov3","facebook","dinov3-vitl16-pretrain-lvd1689m")
+        facebook_model_path = dinov3_new if os.path.exists(dinov3_new) else dinov3_old
+        pipeline._pretrained_args['image_cond_model']['args']['model_name'] = facebook_model_path
 
         return pipeline
         
@@ -199,9 +204,10 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         if self.models['sparse_structure_flow_model'] is None:
             print('Loading Sparse Structure model ...')
             self.models['sparse_structure_flow_model'] = models.from_pretrained(
-                f"{self.path}/{self._pretrained_args['models']['sparse_structure_flow_model']}",
+                os.path.join(self.path, self._pretrained_args['models']['sparse_structure_flow_model']),
                 enable_gguf=getattr(self, 'enable_gguf', False),
-                gguf_quant=getattr(self, 'gguf_quant', 'Q8_0')
+                gguf_quant=getattr(self, 'gguf_quant', 'Q8_0'),
+                precision=getattr(self, 'precision', None)
             )
             self.models['sparse_structure_flow_model'].eval()
             self.models['sparse_structure_flow_model'].to(self._device)
@@ -240,9 +246,10 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         if self.models['shape_slat_flow_model_512'] is None:
             print('Loading Shape Slat Flow 512 model ...')
             self.models['shape_slat_flow_model_512'] = models.from_pretrained(
-                f"{self.path}/{self._pretrained_args['models']['shape_slat_flow_model_512']}",
+                os.path.join(self.path, self._pretrained_args['models']['shape_slat_flow_model_512']),
                 enable_gguf=getattr(self, 'enable_gguf', False),
-                gguf_quant=getattr(self, 'gguf_quant', 'Q8_0')
+                gguf_quant=getattr(self, 'gguf_quant', 'Q8_0'),
+                precision=getattr(self, 'precision', None)
             )
             self.models['shape_slat_flow_model_512'].eval()
             self.models['shape_slat_flow_model_512'].to(self._device)
@@ -257,9 +264,10 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         if self.models['tex_slat_flow_model_512'] is None:
             print('Loading Texture Slat Flow 512 model ...')
             self.models['tex_slat_flow_model_512'] = models.from_pretrained(
-                f"{self.path}/{self._pretrained_args['models']['tex_slat_flow_model_512']}",
+                os.path.join(self.path, self._pretrained_args['models']['tex_slat_flow_model_512']),
                 enable_gguf=getattr(self, 'enable_gguf', False),
-                gguf_quant=getattr(self, 'gguf_quant', 'Q8_0')
+                gguf_quant=getattr(self, 'gguf_quant', 'Q8_0'),
+                precision=getattr(self, 'precision', None)
             )
             self.models['tex_slat_flow_model_512'].eval()
             self.models['tex_slat_flow_model_512'].to(self._device)          
@@ -273,7 +281,10 @@ class Trellis2ImageTo3DPipeline(Pipeline):
     def load_tex_slat_decoder(self):        
         if self.models['tex_slat_decoder'] is None:
             print('Loading Texture Slat decoder model ...')
-            self.models['tex_slat_decoder'] = models.from_pretrained(f"{self.path}/{self._pretrained_args['models']['tex_slat_decoder']}")
+            self.models['tex_slat_decoder'] = models.from_pretrained(
+                os.path.join(self.path, self._pretrained_args['models']['tex_slat_decoder']),
+                precision=getattr(self, 'precision', None)
+            )
             self.models['tex_slat_decoder'].eval()
             self.models['tex_slat_decoder'].to(self._device)
             if hasattr(self.models['tex_slat_decoder'], 'low_vram'):
@@ -288,7 +299,10 @@ class Trellis2ImageTo3DPipeline(Pipeline):
     def load_shape_slat_decoder(self):        
         if self.models['shape_slat_decoder'] is None:
             print('Loading Shape Slat decoder model ...')
-            self.models['shape_slat_decoder'] = models.from_pretrained(f"{self.path}/{self._pretrained_args['models']['shape_slat_decoder']}")
+            self.models['shape_slat_decoder'] = models.from_pretrained(
+                os.path.join(self.path, self._pretrained_args['models']['shape_slat_decoder']),
+                precision=getattr(self, 'precision', None)
+            )
             self.models['shape_slat_decoder'].eval()
             self.models['shape_slat_decoder'].to(self._device)
             if hasattr(self.models['shape_slat_decoder'], 'low_vram'):
@@ -304,9 +318,10 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         if self.models['shape_slat_flow_model_1024'] is None:
             print('Loading Shape Slat Flow 1024 model ...')
             self.models['shape_slat_flow_model_1024'] = models.from_pretrained(
-                f"{self.path}/{self._pretrained_args['models']['shape_slat_flow_model_1024']}",
+                os.path.join(self.path, self._pretrained_args['models']['shape_slat_flow_model_1024']),
                 enable_gguf=getattr(self, 'enable_gguf', False),
-                gguf_quant=getattr(self, 'gguf_quant', 'Q8_0')
+                gguf_quant=getattr(self, 'gguf_quant', 'Q8_0'),
+                precision=getattr(self, 'precision', None)
             )
             self.models['shape_slat_flow_model_1024'].eval()
             self.models['shape_slat_flow_model_1024'].to(self._device)           
@@ -321,9 +336,10 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         if self.models['tex_slat_flow_model_1024'] is None:
             print('Loading Texture Slat Flow 1024 model ...')
             self.models['tex_slat_flow_model_1024'] = models.from_pretrained(
-                f"{self.path}/{self._pretrained_args['models']['tex_slat_flow_model_1024']}",
+                os.path.join(self.path, self._pretrained_args['models']['tex_slat_flow_model_1024']),
                 enable_gguf=getattr(self, 'enable_gguf', False),
-                gguf_quant=getattr(self, 'gguf_quant', 'Q8_0')
+                gguf_quant=getattr(self, 'gguf_quant', 'Q8_0'),
+                precision=getattr(self, 'precision', None)
             )
             self.models['tex_slat_flow_model_1024'].eval()
             self.models['tex_slat_flow_model_1024'].to(self._device)                   

@@ -6,6 +6,8 @@ from PIL import Image, ImageSequence, ImageOps
 from pathlib import Path
 import numpy as np
 import json
+import torch.nn as nn
+import sys
 import trimesh as Trimesh
 from tqdm import tqdm
 import time
@@ -71,7 +73,7 @@ def rotate_triton_cache():
     # 3. Point Triton to this NEW empty folder
     # This forces a recompile without needing to delete the locked file immediately
     os.environ["TRITON_CACHE_DIR"] = str(new_cache_path)
-    print(f"[TrellisNode] 🔄 Switched to fresh Triton cache: {new_cache_path.name}")
+    print(f"[TrellisNode] Switched to fresh Triton cache: {new_cache_path.name}")
 
     # 4. Garbage Collection: Try to delete OLD cache folders
     # We wrap this in a try/except so if Windows locks a file, we just skip it
@@ -87,7 +89,7 @@ def cleanup_old_caches(current_active):
         if item.is_dir() and item != current_active:
             try:
                 shutil.rmtree(item)
-                print(f"[TrellisNode] 🧹 Cleaned up old cache: {item.name}")
+                print(f"[TrellisNode] Cleaned up old cache: {item.name}")
             except OSError:
                 # This is expected on Windows! The file is locked.
                 # We just ignore it and try again next time the node runs.
@@ -321,7 +323,14 @@ class Trellis2LoadModel:
         return {
             "required": {
                 "modelname": (["TRELLIS.2-4B"],),
-                "model_format": (["Safetensors (FP16)", "GGUF Q8_0", "GGUF Q6_K", "GGUF Q5_K", "GGUF Q4_K"], {"default": "Safetensors (FP16)"}),
+                "model_format": ([
+                    "Safetensors (BF16)", 
+                    "Safetensors (FP8)", 
+                    "GGUF Q8_0", 
+                    "GGUF Q6_K", 
+                    "GGUF Q5_K_M", 
+                    "GGUF Q4_K_M"
+                ], {"default": "Safetensors (BF16)"}),
                 "backend": (["flash_attn","xformers"],{"default":"xformers"}),
                 "device": (["cpu","cuda"],{"default":"cuda"}),
                 "low_vram": ("BOOLEAN",{"default":True}),
@@ -343,85 +352,62 @@ class Trellis2LoadModel:
         os.environ['ATTN_BACKEND'] = backend
         
         reset_cuda()
-        
         torch.backends.cudnn.benchmark = False
-        
-        download_path = os.path.join(folder_paths.models_dir,"microsoft")
-        model_path = os.path.join(download_path, modelname)
-        
-        hf_model_name = f"microsoft/{modelname}"
-        
-        if not os.path.exists(model_path):
-            print(f"Downloading model to: {model_path}")
-            from huggingface_hub import snapshot_download
-            snapshot_download(
-                repo_id=hf_model_name,
-                local_dir=model_path,
-                local_dir_use_symlinks=False,
-            )
-            
-        dinov3_model_path = os.path.join(folder_paths.models_dir,"facebook","dinov3-vitl16-pretrain-lvd1689m","model.safetensors")
-        if not os.path.exists(dinov3_model_path):
-            print(f"Downloading DINOv3 model from Aero-Ex/Dinov3...")
-            from huggingface_hub import snapshot_download
-            snapshot_download(
-                repo_id="Aero-Ex/Dinov3",
-                local_dir=folder_paths.models_dir,
-                allow_patterns=["facebook/dinov3-vitl16-pretrain-lvd1689m/*"],
-                local_dir_use_symlinks=False,
-            )
-            if not os.path.exists(dinov3_model_path):
-                raise Exception("Failed to download Facebook Dinov3 model from Aero-Ex/Dinov3")
-        
-        trellis_image_large_path = os.path.join(folder_paths.models_dir,"microsoft","TRELLIS-image-large","ckpts","ss_dec_conv3d_16l8_fp16.safetensors")
-        if not os.path.exists(trellis_image_large_path):
-            print('Trellis-Image-Large ss_dec_conv3d_16l8_fp16 files not found. Trying to download the files from huggingface ...')
-            import requests
-            url = "https://huggingface.co/microsoft/TRELLIS-image-large/resolve/main/ckpts/ss_dec_conv3d_16l8_fp16.json?download=true"
-            filename = os.path.join(folder_paths.models_dir,"microsoft","TRELLIS-image-large","ckpts","ss_dec_conv3d_16l8_fp16.json")
-            path = Path(filename)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            
-            response = requests.get(url)
-            if response.status_code == 200:
-                with open(filename, "wb") as f:
-                    f.write(response.content)
-                print("Download ss_dec_conv3d_16l8_fp16.json complete!")
-            else:
-                raise Exception("Cannot download Trellis-Image-Large file ss_dec_conv3d_16l8_fp16.json")
-            
-            url = "https://huggingface.co/microsoft/TRELLIS-image-large/resolve/main/ckpts/ss_dec_conv3d_16l8_fp16.safetensors?download=true"
-            filename = os.path.join(folder_paths.models_dir,"microsoft","TRELLIS-image-large","ckpts","ss_dec_conv3d_16l8_fp16.safetensors")
 
-            response = requests.get(url)
-            if response.status_code == 200:
-                with open(filename, "wb") as f:
-                    f.write(response.content)
-                print("Download ss_dec_conv3d_16l8_fp16.safetensors complete!")
-            else:
-                raise Exception("Cannot download Trellis-Image-Large file ss_dec_conv3d_16l8_fp16.safetensors")
-        
-       
+        # ── Delegate ALL downloading to model_manager ─────────────────────
+        import importlib.util, sys as _sys
+        _mm_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "model_manager.py")
+        if "trellis2_model_manager" not in _sys.modules:
+            spec = importlib.util.spec_from_file_location("trellis2_model_manager", _mm_path)
+            _mm = importlib.util.module_from_spec(spec)
+            _sys.modules["trellis2_model_manager"] = _mm
+            spec.loader.exec_module(_mm)
+        model_manager = _sys.modules["trellis2_model_manager"]
+
+        model_path = model_manager.get_models_dir()
+
+        # Ensure pipeline.json exists first; read it, then delegate everything
+        import json
+        pipeline_json_local = os.path.join(model_path, "pipeline.json")
+        if not os.path.exists(pipeline_json_local):
+            from huggingface_hub import hf_hub_download
+            print(f"[Trellis2] Downloading pipeline.json from {model_manager.GGUF_REPO}...")
+            hf_hub_download(repo_id=model_manager.GGUF_REPO, filename="pipeline.json", local_dir=model_path)
+
+        with open(pipeline_json_local, 'r') as f:
+            pipeline_config = json.load(f)
+
+        # This is the ONLY place that downloads model files
+        model_manager.ensure_model_files(model_format, pipeline_config)
+
+        # ── Parse format for pipeline construction ────────────────────────
         enable_gguf = model_format.startswith("GGUF")
         gguf_quant = model_format.split(" ")[1] if enable_gguf else "Q8_0"
+        precision = None
+        if "(BF16)" in model_format: precision = "bf16"
+        elif "(FP8)" in model_format: precision = "fp8"
+
         pipeline = Trellis2ImageTo3DPipeline.from_pretrained(
             model_path,
             keep_models_loaded=keep_models_loaded,
             enable_gguf=enable_gguf,
             gguf_quant=gguf_quant,
+            precision=precision,
         )
-      
+
         pipeline.low_vram = low_vram
-        
-        if device=="cuda":
+
+        if device == "cuda":
             if low_vram:
                 pipeline.cuda()
             else:
                 pipeline.to(device)
         else:
             pipeline.to(device)
-        
+
         return (pipeline,)
+
+
         
 class Trellis2MeshWithVoxelGenerator:
     @classmethod
@@ -2066,34 +2052,45 @@ class Trellis2ReconstructMeshWithQuad:
     OUTPUT_NODE = True
 
     def process(self, mesh, remesh_band, resolution, remove_floaters, remove_inner_faces):
+        import comfy.model_management as mm
+        from .nodes import reset_cuda
         reset_cuda()
         
-        mesh_copy = copy.deepcopy(mesh)
-        
-        vertices = mesh_copy.vertices.cuda().contiguous()
-        faces = mesh_copy.faces.cuda().contiguous()
-        
-        # Free as much GPU memory as possible before the memory-intensive quad reconstruction
-        import comfy.model_management as mm
+        # 1. Unload ALL models immediately to free VRAM for reconstruction
+        print('[Trellis2] Unloading models to free VRAM for reconstruction...')
         mm.unload_all_models()
         mm.soft_empty_cache()
         torch.cuda.empty_cache()
+        gc.collect()
+        
+        # 2. Avoid deepcopy if possible, or do it after unloading
+        # We need the original mesh object for returning but we'll modify it.
+        # If the user wants to keep the original, they should branch in ComfyUI.
+        # But for safety in a node, let's just use what we have.
+        # Actually, deepcopy(mesh) might be huge if it has textures.
+        # Let's just create a new Mesh object with the new vertices/faces later.
+        
+        # 3. Move only what's needed to GPU AFTER clearing
+        vertices = mesh.vertices.cuda().contiguous()
+        faces = mesh.faces.cuda().contiguous()
         
         # Perform Dual Contouring remeshing (rebuilds topology)
-        print('Reconstructing mesh ...')
+        print(f'Reconstructing mesh at resolution {resolution}...')
         vertices, faces = CuMesh.remeshing.reconstruct_mesh_dc_quad(vertices, faces, resolution, verbose=True, remove_inner_faces = remove_inner_faces)
         
         if remove_floaters:
-            vertices, faces = remove_floater2(vertices.cpu().numpy(),faces.cpu().numpy())
+            vertices, faces = remove_floater2(vertices.cpu().numpy(), faces.cpu().numpy())
             vertices = torch.from_numpy(vertices).contiguous().float()
             faces = torch.from_numpy(faces).contiguous().int()         
         
         print(f"After reconstruction: {len(vertices)} vertices, {len(faces)} faces")                                 
         
-        mesh_copy.vertices = vertices.to(mesh_copy.device)
-        mesh_copy.faces = faces.to(mesh_copy.device) 
+        # Return a new Mesh object to be safe
+        new_mesh = copy.copy(mesh) # shallow copy is enough
+        new_mesh.vertices = vertices.to(mesh.device)
+        new_mesh.faces = faces.to(mesh.device) 
                 
-        return (mesh_copy,)         
+        return (new_mesh,)         
         
 class Trellis2MeshTexturing:
     @classmethod

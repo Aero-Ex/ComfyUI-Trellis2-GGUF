@@ -24,18 +24,20 @@ def chunked_apply(module: nn.Module, x: torch.Tensor, chunk_size: int) -> torch.
     return out
 
 
-def inplace_skip_add(h: sp.SparseTensor, skip_feats: torch.Tensor, chunk_size: int) -> sp.SparseTensor:
+def inplace_skip_add(h: sp.SparseTensor, skip_module_or_fn: Callable, x: sp.SparseTensor, chunk_size: int) -> sp.SparseTensor:
     """
     Perform in-place addition of skip connection features to reduce peak memory.
-    Processes in chunks if low_vram mode is needed.
+    Evaluates skip_module_or_fn in chunks if low_vram mode is needed.
     """
     if chunk_size <= 0 or h.feats.shape[0] <= chunk_size:
-        h.feats.add_(skip_feats)
+        skip = skip_module_or_fn(x)
+        h.feats.add_(skip.feats if hasattr(skip, 'feats') else skip)
     else:
         for i in range(0, h.feats.shape[0], chunk_size):
             end = min(i + chunk_size, h.feats.shape[0])
-            h.feats[i:end].add_(skip_feats[i:end])
-    del skip_feats
+            x_chunk = x.replace(x.feats[i:end])
+            skip_chunk = skip_module_or_fn(x_chunk)
+            h.feats[i:end].add_(skip_chunk.feats if hasattr(skip_chunk, 'feats') else skip_chunk)
     return h
 
 
@@ -124,8 +126,7 @@ class SparseResBlock3d(nn.Module):
             h = h.replace(F.silu(h.feats))
         h = self.conv2(h)
         if self.low_vram:
-            skip = self.skip_connection(x)
-            h = inplace_skip_add(h, skip.feats if hasattr(skip, 'feats') else skip, self.chunk_size)
+            h = inplace_skip_add(h, self.skip_connection, x, self.chunk_size)
         else:
             h = h + self.skip_connection(x)
         if self.upsample:
@@ -182,8 +183,7 @@ class SparseResBlockDownsample3d(nn.Module):
         h = self.conv2(h)
         if self.low_vram:
             x = self.updown(x)
-            skip = self.skip_connection(x)
-            h = inplace_skip_add(h, skip.feats if hasattr(skip, 'feats') else skip, self.chunk_size)
+            h = inplace_skip_add(h, self.skip_connection, x, self.chunk_size)
         else:
             x = self.updown(x)
             h = h + self.skip_connection(x)
@@ -247,8 +247,7 @@ class SparseResBlockUpsample3d(nn.Module):
         h = self.conv2(h)
         if self.low_vram:
             x = self.updown(x, subdiv_binarized)
-            skip = self.skip_connection(x)
-            h = inplace_skip_add(h, skip.feats if hasattr(skip, 'feats') else skip, self.chunk_size)
+            h = inplace_skip_add(h, self.skip_connection, x, self.chunk_size)
         else:
             x = self.updown(x, subdiv_binarized)
             h = h + self.skip_connection(x)
@@ -308,8 +307,7 @@ class SparseResBlockS2C3d(nn.Module):
         h = self.conv2(h)
         if self.low_vram:
             x = self.updown(x)
-            skip = self.skip_connection(x)
-            h = inplace_skip_add(h, skip.feats if hasattr(skip, 'feats') else skip, self.chunk_size)
+            h = inplace_skip_add(h, self.skip_connection, x, self.chunk_size)
         else:
             x = self.updown(x)
             h = h + self.skip_connection(x)
@@ -373,8 +371,7 @@ class SparseResBlockC2S3d(nn.Module):
         h = self.conv2(h)
         if self.low_vram:
             x = self.updown(x, subdiv_binarized)
-            skip = self.skip_connection(x)
-            h = inplace_skip_add(h, skip.feats if hasattr(skip, 'feats') else skip, self.chunk_size)
+            h = inplace_skip_add(h, self.skip_connection, x, self.chunk_size)
         else:
             x = self.updown(x, subdiv_binarized)
             h = h + self.skip_connection(x)
@@ -784,10 +781,15 @@ class SparseUnetVaeDecoder(nn.Module):
                     nn.init.constant_(module.bias, 0)
         self.apply(_basic_init)
 
-    def forward(self, x: sp.SparseTensor, guide_subs: Optional[List[sp.SparseTensor]] = None, return_subs: bool = False) -> sp.SparseTensor:
+    def forward(self, x: sp.SparseTensor, guide_subs: Optional[List[sp.SparseTensor]] = None, return_subs: bool = False, use_tiled: bool = False, **kwargs) -> sp.SparseTensor:
         assert guide_subs is None or self.pred_subdiv == False, "Only decoders with pred_subdiv=False can be used with guide_subs"
         assert return_subs == False or self.pred_subdiv == True, "Only decoders with pred_subdiv=True can be used with return_subs"
         
+        if use_tiled:
+            # Tile decoding returns merged sparse features, skip returning subs since tiling is eval-only
+            out_h = self._tiled_forward(x, guide_subs=guide_subs)
+            return (out_h, []) if return_subs else out_h
+
         h = self.from_latent(x)
         h = h.type(self.dtype)
         subs_gt = []
@@ -1009,7 +1011,7 @@ class SparseUnetVaeDecoder(nn.Module):
                         # Forward pass for this tile
                         if self.low_vram:
                             torch.cuda.empty_cache()
-                        h = self.forward(sub_x, sub_guide_subs, return_subs=False)
+                        h = self.forward(sub_x, sub_guide_subs, return_subs=False, use_tiled=False, return_raw_h=True)
                         
                         # Accumulate ALL output voxels to enable seamless blending (averaging).
                         # Previously we used a "hard cut" mask which caused seams.

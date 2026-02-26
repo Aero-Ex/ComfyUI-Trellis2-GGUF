@@ -83,12 +83,20 @@ class FlexiDualGridVaeDecoder(SparseUnetVaeDecoder):
         self.resolution = resolution
         
     def forward(self, x: sp.SparseTensor, gt_intersected: sp.SparseTensor = None, useTiled: bool = True, **kwargs):
+        # Allow kwargs to override useTiled if provided internally (e.g. by _tiled_forward)
+        use_tiled = kwargs.pop('use_tiled', useTiled)
+        # To avoid converting intermediate tiles into meshes, let's intercept a custom kwargs flag `return_raw_h`.
+        return_raw_h = kwargs.pop('return_raw_h', False)
+        
         # Clear stale spatial caches from any previous run.
         # Since `replace()` propagates `_spatial_cache` by reference, neighbor maps
         # built during run 1 would otherwise be reused (with wrong indices) in run 2,
         # causing corrupted vertex positions ("infinite vertical lines" artifact).
         x.clear_spatial_cache()
-        decoded = super().forward(x, **kwargs)
+        decoded = super().forward(x, use_tiled=use_tiled, **kwargs)
+        
+        if return_raw_h:
+            return decoded
         if self.training:
             h, subs_gt, subs = decoded
             if self.low_vram:
