@@ -773,6 +773,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         use_tiled: bool = True,
         shape_tile_size: int = 48,
         shape_tile_overlap: int = 12,
+        return_subs: bool = True,
     ) -> Tuple[List[Mesh], List[SparseTensor]]:
         """
         Decode the structured latent.
@@ -783,6 +784,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             use_tiled (bool): Whether to use tiled decoding.
             shape_tile_size (int): Latent-space tile size for shape decoder (smaller = less VRAM, more tiles).
             shape_tile_overlap (int): Overlap between shape decoder tiles.
+            return_subs (bool): Whether to return subdivision tensors (needed for texture).
 
         Returns:
             List[Mesh]: The decoded meshes.
@@ -814,8 +816,8 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         shape_tile_overlap = getattr(self, 'shape_decoder_tile_overlap', shape_tile_overlap)
         if use_tiled:
             print(f"[Trellis2-decode_shape_slat] tile_size={shape_tile_size}, overlap={shape_tile_overlap}, "
-                  f"latent_voxels={slat.coords.shape[0]}")
-        ret = self.models['shape_slat_decoder'](slat, return_subs=True, useTiled=use_tiled,
+                  f"latent_voxels={slat.coords.shape[0]}, return_subs={return_subs}")
+        ret = self.models['shape_slat_decoder'](slat, return_subs=return_subs, useTiled=use_tiled,
                                                 tile_size=shape_tile_size, tile_overlap=shape_tile_overlap)
         if self.low_vram:
             print(f"[Trellis2-decode_shape_slat] VRAM after decoder forward: "
@@ -944,7 +946,10 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             tex_slat (SparseTensor): The structured latent for texture.
             resolution (int): The resolution of the output.
         """
-        meshes, subs = self.decode_shape_slat(shape_slat, resolution, use_tiled=use_tiled)
+        self._vlog("decode_latent [start]")
+        if tex_slat is not None:
+            print(f"[Trellis2-decode_latent] Coords: shape_slat={shape_slat.coords.shape[0]}, tex_slat={tex_slat.coords.shape[0]}")
+        meshes, subs = self.decode_shape_slat(shape_slat, resolution, use_tiled=use_tiled, return_subs=(tex_slat is not None))
         if self.low_vram:
             self._cleanup_cuda()                                                         
             

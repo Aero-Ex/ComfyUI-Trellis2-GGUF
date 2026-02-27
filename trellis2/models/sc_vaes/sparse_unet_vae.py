@@ -786,11 +786,12 @@ class SparseUnetVaeDecoder(nn.Module):
         assert return_subs == False or self.pred_subdiv == True, "Only decoders with pred_subdiv=True can be used with return_subs"
         
         if use_tiled:
-            # Tile decoding returns merged sparse features, skip returning subs since tiling is eval-only
+            # Tile decoding returns merged sparse features. 
+            # If return_subs=True, we now merge and return them across tiles.
             tile_size = kwargs.pop('tile_size', 48)
             tile_overlap = kwargs.pop('tile_overlap', 12)
-            out_h = self._tiled_forward(x, guide_subs=guide_subs, tile_size=tile_size, overlap=tile_overlap)
-            return (out_h, []) if return_subs else out_h
+            out = self._tiled_forward(x, guide_subs=guide_subs, tile_size=tile_size, overlap=tile_overlap, return_subs=return_subs)
+            return out
 
         h = self.from_latent(x)
         h = h.type(self.dtype)
@@ -802,6 +803,35 @@ class SparseUnetVaeDecoder(nn.Module):
             curr_guide = None
             if guide_subs is not None and i < len(guide_subs):
                 curr_guide = guide_subs[i]
+                
+                # Safety check: Match guide coordinates to hidden state h
+                # This handles mismatches in refine_mesh where latents may differ.
+                if curr_guide is not None and curr_guide.coords.shape[0] != h.coords.shape[0]:
+                    print(f"    [Trellis2] Mismatch in Guide {i}: {curr_guide.coords.shape[0]} vs {h.coords.shape[0]}. Filtering...")
+                    stride = torch.tensor([1024**3, 1024**2, 1024, 1], device=h.device, dtype=torch.int64)
+                    h_keys = (h.coords.long() * stride).sum(dim=1)
+                    g_keys = (curr_guide.coords.long() * stride).sum(dim=1)
+                    
+                    # Compute lookup
+                    g_so = torch.argsort(g_keys)
+                    g_ks = g_keys[g_so]
+                    pos = torch.searchsorted(g_ks, h_keys)
+                    pos_c = pos.clamp(0, g_ks.shape[0] - 1)
+                    match = g_ks[pos_c] == h_keys
+                    
+                    if not match.all():
+                        print(f"    [Trellis2] WARNING: {h_keys.numel() - match.sum().item()} voxels in h not found in guide!")
+                    
+                    # Create filtered guide that perfectly matches h.coords
+                    f_feats = torch.zeros((h.coords.shape[0], curr_guide.feats.shape[1]), device=h.device, dtype=curr_guide.feats.dtype)
+                    f_feats[match] = curr_guide.feats[g_so[pos_c[match]]]
+                    curr_guide = sp.SparseTensor(
+                        feats=f_feats,
+                        coords=h.coords,
+                        scale=curr_guide._scale,
+                        spatial_shape=curr_guide.spatial_shape
+                    )
+
                 if curr_guide is not None and curr_guide.device.type == 'cpu':
                     if self.low_vram and curr_guide.coords.shape[0] > 100000:
                         print(f"    [Trellis2] Streaming Guide {i} to GPU ({curr_guide.coords.shape[0]} voxels)")
@@ -850,7 +880,7 @@ class SparseUnetVaeDecoder(nn.Module):
             else:
                 return h
                 
-    def _tiled_forward(self, x: sp.SparseTensor, guide_subs: Optional[List[sp.SparseTensor]] = None, tile_size: int = 48, overlap: int = 12) -> sp.SparseTensor:
+    def _tiled_forward(self, x: sp.SparseTensor, guide_subs: Optional[List[sp.SparseTensor]] = None, tile_size: int = 48, overlap: int = 12, return_subs: bool = False) -> sp.SparseTensor:
         """
         Forward pass with spatial chunking to save memory during decoding.
         We chunk the latent `x` and process it. Note that decoding upsamples, so the 
@@ -929,6 +959,15 @@ class SparseUnetVaeDecoder(nn.Module):
         out_scale = None
         saved_spatial_cache = {}  # will be populated from the last tile's h._spatial_cache
         self._tiled_debug_printed = False  # reset per-run so logs appear each call
+        
+        all_subs_coords = [] # List of lists: [level][tile] (for levels > 0)
+        all_subs_feats = []  # List of lists: [level][tile] (for levels > 0)
+        all_subs_scales = []
+        
+        # Level 0 subdivision template merging (tied to original x.coords)
+        merged_subs0_feats = None
+        merged_subs0_counts = None
+        
         print(f"[Trellis2 Tiled] Starting tiled decode: {coords.shape[0]} latent voxels, "
               f"tile_size={tile_size}, overlap={overlap}, "
               f"tiles={len(x_range)}×{len(y_range)}×{len(z_range)}")
@@ -1013,7 +1052,37 @@ class SparseUnetVaeDecoder(nn.Module):
                         # Forward pass for this tile
                         if self.low_vram:
                             torch.cuda.empty_cache()
-                        h = self.forward(sub_x, sub_guide_subs, return_subs=False, use_tiled=False, return_raw_h=True)
+                            
+                        # If we need subs, we must request them from the tile decoder
+                        tile_out = self.forward(sub_x, sub_guide_subs, return_subs=return_subs, use_tiled=False, return_raw_h=True)
+                        if return_subs:
+                            h, subs = tile_out
+                            # Initialize sub-accumulation on first tile with subs
+                            if not all_subs_scales:
+                                for _ in range(len(subs)):
+                                    all_subs_coords.append([])
+                                    all_subs_feats.append([])
+                                    all_subs_scales.append(None)
+                                
+                                # Level 0 template initialization
+                                merged_subs0_feats = torch.zeros((x.coords.shape[0], subs[0].feats.shape[1]), device='cpu', dtype=torch.float32)
+                                merged_subs0_counts = torch.zeros((x.coords.shape[0], 1), device='cpu', dtype=torch.float32)
+                            
+                            for i, s in enumerate(subs):
+                                if i == 0:
+                                    # Level 0: Template merge using the mask!
+                                    # Since sub_x was x.coords[mask], s.coords matches x.coords[mask].
+                                    merged_subs0_feats[mask] += s.feats.float().cpu()
+                                    merged_subs0_counts[mask] += 1
+                                else:
+                                    # Higher levels: Unique merge
+                                    all_subs_coords[i].append(s.coords.cpu())
+                                    all_subs_feats[i].append(s.feats.float().cpu())
+                                
+                                if all_subs_scales[i] is None:
+                                    all_subs_scales[i] = s._scale
+                        else:
+                            h = tile_out
                         
                         # Accumulate ALL output voxels to enable seamless blending (averaging).
                         # Previously we used a "hard cut" mask which caused seams.
@@ -1021,10 +1090,10 @@ class SparseUnetVaeDecoder(nn.Module):
                         all_h_coords.append(h.coords.cpu())
                         all_h_feats.append(h.feats.float().cpu())
                         
-                        # Save THE MINIMUM essential spatial_cache (grid shape + subdivision maps)
+                        # Save THE MINIMUM essential spatial_cache (grid shape)
                         # to prevent pinning large neighbor/layout tensors in VRAM.
-                        # subdivision is critical for correct mesh sampling down the line!
-                        for k in ['shape', 'subdivision']:
+                        # subdivision is handled separately by the return_subs logic.
+                        for k in ['shape']:
                             if k in h._spatial_cache:
                                 saved_spatial_cache[k] = h._spatial_cache[k]
                         
@@ -1080,6 +1149,38 @@ class SparseUnetVaeDecoder(nn.Module):
             )
             print(f"[Trellis2 Tiled] Final spatial_shape={list(h_merged.spatial_shape)}")
         
+        if return_subs:
+            merged_subs = []
+            for i in range(len(all_subs_scales)):
+                if i == 0:
+                    # Finalize Level 0 merge
+                    merged_subs0_feats /= merged_subs0_counts.clamp(min=1.0)
+                    merged_subs.append(sp.SparseTensor(
+                        feats=merged_subs0_feats.to(device).to(self.dtype),
+                        coords=x.coords.to(device),
+                        scale=all_subs_scales[i]
+                    ))
+                else:
+                    # Finalize Higher levels merge via unique
+                    lvl_coords = torch.cat(all_subs_coords[i], dim=0)
+                    lvl_feats = torch.cat(all_subs_feats[i], dim=0)
+                    
+                    # Deduplicate and average subdivision maps
+                    u_coords, inv = torch.unique(lvl_coords, dim=0, return_inverse=True)
+                    m_feats = torch.zeros((u_coords.shape[0], lvl_feats.shape[1]), device='cpu', dtype=torch.float32)
+                    m_counts = torch.zeros((u_coords.shape[0], 1), device='cpu', dtype=torch.float32)
+                    
+                    m_feats.scatter_add_(0, inv.unsqueeze(1).expand_as(lvl_feats), lvl_feats)
+                    m_counts.scatter_add_(0, inv.unsqueeze(1), torch.ones((lvl_feats.shape[0], 1), device='cpu'))
+                    m_feats /= m_counts.clamp(min=1.0)
+                    
+                    merged_subs.append(sp.SparseTensor(
+                        feats=m_feats.to(device).to(self.dtype),
+                        coords=u_coords.to(device),
+                        scale=all_subs_scales[i]
+                    ))
+            return h_merged, merged_subs
+
         return h_merged
     
     def _tiled_upsample(self, x: sp.SparseTensor, upsample_times: int, tile_size: int = 16, overlap: int = 2) -> torch.Tensor:
