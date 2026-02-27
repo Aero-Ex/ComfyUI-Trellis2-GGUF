@@ -133,17 +133,51 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             torch.cuda.synchronize()
             torch.cuda.empty_cache()
 
+    def _vram_mb(self) -> float:
+        """Return current GPU allocated memory in MB (0 if CUDA not available)."""
+        if torch.cuda.is_available():
+            return torch.cuda.memory_allocated() / 1024**2
+        return 0.0
+
+    def _vlog(self, stage: str) -> None:
+        """Print a compact VRAM snapshot: allocated + reserved."""
+        if torch.cuda.is_available():
+            a = torch.cuda.memory_allocated() / 1024**2
+            r = torch.cuda.memory_reserved() / 1024**2
+            print(f"[VRAM] {stage}: alloc={a:.0f} MB  reserved={r:.0f} MB")
+
     def move_all_to_cpu(self):
-        """Move all models in the pipeline to CPU."""
-        print("[Trellis2] Offloading all models to CPU...")
+        """Move all models in the pipeline to CPU, logging VRAM freed per model."""
+        if torch.cuda.is_available():
+            vram_start = torch.cuda.memory_allocated() / 1024**2
+            print(f"[Trellis2] Offloading all models to CPU... (VRAM before: {vram_start:.0f} MB)")
+        else:
+            print("[Trellis2] Offloading all models to CPU...")
         for name, model in self.models.items():
             if model is not None:
+                before = self._vram_mb()
                 model.cpu()
+                after = self._vram_mb()
+                freed = before - after
+                if freed > 1.0:  # only log if something actually moved
+                    print(f"  [Trellis2] Offloaded '{name}': freed {freed:.0f} MB (now {after:.0f} MB)")
         if self.image_cond_model is not None:
+            before = self._vram_mb()
             self.image_cond_model.cpu()
+            freed = before - self._vram_mb()
+            if freed > 1.0:
+                print(f"  [Trellis2] Offloaded 'image_cond_model': freed {freed:.0f} MB")
         if self.rembg_model is not None:
+            before = self._vram_mb()
             self.rembg_model.cpu()
+            freed = before - self._vram_mb()
+            if freed > 1.0:
+                print(f"  [Trellis2] Offloaded 'rembg_model': freed {freed:.0f} MB")
         self._cleanup_cuda()
+        if torch.cuda.is_available():
+            vram_end = torch.cuda.memory_allocated() / 1024**2
+            reserved_end = torch.cuda.memory_reserved() / 1024**2
+            print(f"  [Trellis2] After offload: allocated={vram_end:.0f} MB, reserved={reserved_end:.0f} MB")
 
     @classmethod
     def from_pretrained(cls, path: str, config_file: str = "pipeline.json", keep_models_loaded = True,
@@ -304,7 +338,9 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 precision=getattr(self, 'precision', None)
             )
             self.models['shape_slat_decoder'].eval()
-            self.models['shape_slat_decoder'].to(self._device)
+            # In low_vram mode, keep on CPU until decode_shape_slat moves it to device
+            if not self.low_vram:
+                self.models['shape_slat_decoder'].to(self._device)
             if hasattr(self.models['shape_slat_decoder'], 'low_vram'):
                 self.models['shape_slat_decoder'].low_vram = self.low_vram
 
@@ -513,6 +549,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             num_samples (int): The number of samples to generate.
             sampler_params (dict): Additional parameters for the sampler.
         """
+        self._vlog("sample_sparse_structure [start]")
         if self.low_vram:
             cond = self._cond_to(cond, self.device)                         
         # Sample sparse structure latent
@@ -552,6 +589,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         if self.low_vram:
             cond = self._cond_cpu(cond)
             self._cleanup_cuda()
+        self._vlog("sample_sparse_structure [end]")
         return coords
 
     def sample_shape_slat(
@@ -569,6 +607,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             coords (torch.Tensor): The coordinates of the sparse structure.
             sampler_params (dict): Additional parameters for the sampler.
         """
+        self._vlog("sample_shape_slat [start]")
         if self.low_vram:
             cond = self._cond_to(cond, self.device)
 
@@ -602,6 +641,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             cond = self._cond_cpu(cond)
             self._cleanup_cuda()
 
+        self._vlog("sample_shape_slat [end]")
         return slat
     
     def sample_shape_slat_cascade(
@@ -624,6 +664,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             coords (torch.Tensor): The coordinates of the sparse structure.
             sampler_params (dict): Additional parameters for the sampler.
         """
+        self._vlog("sample_shape_slat_cascade [start]")
         # LR
 
         if self.low_vram:
@@ -722,6 +763,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             cond = self._cond_cpu(cond)
             self._cleanup_cuda()
 
+        self._vlog("sample_shape_slat_cascade [end]")
         return slat, hr_resolution
 
     def decode_shape_slat(
@@ -729,29 +771,60 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         slat: SparseTensor,
         resolution: int,
         use_tiled: bool = True,
+        shape_tile_size: int = 48,
+        shape_tile_overlap: int = 12,
     ) -> Tuple[List[Mesh], List[SparseTensor]]:
         """
         Decode the structured latent.
 
         Args:
             slat (SparseTensor): The structured latent.
+            resolution (int): Output mesh resolution.
+            use_tiled (bool): Whether to use tiled decoding.
+            shape_tile_size (int): Latent-space tile size for shape decoder (smaller = less VRAM, more tiles).
+            shape_tile_overlap (int): Overlap between shape decoder tiles.
 
         Returns:
             List[Mesh]: The decoded meshes.
             List[SparseTensor]: The decoded substructures.
         """
         
+        # Ensure all other models (especially large GGUF flow model) are fully
+        # off the GPU before we load the shape decoder. Even with `low_vram` the
+        # PyTorch reserved pool from previous sampling may still occupy VRAM.
+        if self.low_vram:
+            print(f"[Trellis2-decode_shape_slat] VRAM before offload: "
+                  f"alloc={self._vram_mb():.0f} MB, reserved={torch.cuda.memory_reserved()/1024**2:.0f} MB")
+            self.move_all_to_cpu()
+            print(f"[Trellis2-decode_shape_slat] VRAM after offload: "
+                  f"alloc={self._vram_mb():.0f} MB, reserved={torch.cuda.memory_reserved()/1024**2:.0f} MB")
+
         self.load_shape_slat_decoder()
         
         self.models['shape_slat_decoder'].set_resolution(resolution)
         if self.low_vram:
+            print(f"[Trellis2-decode_shape_slat] VRAM before loading decoder to GPU: "
+                  f"alloc={self._vram_mb():.0f} MB, reserved={torch.cuda.memory_reserved()/1024**2:.0f} MB")
             self.models['shape_slat_decoder'].to(self.device)
             self.models['shape_slat_decoder'].low_vram = True
-        ret = self.models['shape_slat_decoder'](slat, return_subs=True, useTiled=use_tiled)
+            print(f"[Trellis2-decode_shape_slat] VRAM after loading decoder to GPU: "
+                  f"alloc={self._vram_mb():.0f} MB, reserved={torch.cuda.memory_reserved()/1024**2:.0f} MB")
+        # Allow overriding via stored pipeline attrs (set by nodes.py before calling)
+        shape_tile_size = getattr(self, 'shape_decoder_tile_size', shape_tile_size)
+        shape_tile_overlap = getattr(self, 'shape_decoder_tile_overlap', shape_tile_overlap)
+        if use_tiled:
+            print(f"[Trellis2-decode_shape_slat] tile_size={shape_tile_size}, overlap={shape_tile_overlap}, "
+                  f"latent_voxels={slat.coords.shape[0]}")
+        ret = self.models['shape_slat_decoder'](slat, return_subs=True, useTiled=use_tiled,
+                                                tile_size=shape_tile_size, tile_overlap=shape_tile_overlap)
         if self.low_vram:
+            print(f"[Trellis2-decode_shape_slat] VRAM after decoder forward: "
+                  f"alloc={self._vram_mb():.0f} MB, reserved={torch.cuda.memory_reserved()/1024**2:.0f} MB")
             self.models['shape_slat_decoder'].cpu()
             self.models['shape_slat_decoder'].low_vram = False
-            self._cleanup_cuda()                
+            self._cleanup_cuda()
+            print(f"[Trellis2-decode_shape_slat] VRAM after decoder offload+cleanup: "
+                  f"alloc={self._vram_mb():.0f} MB, reserved={torch.cuda.memory_reserved()/1024**2:.0f} MB")
         
         if not self.keep_models_loaded:        
             self.unload_shape_slat_decoder()
@@ -773,6 +846,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             shape_slat (SparseTensor): The structured latent for shape
             sampler_params (dict): Additional parameters for the sampler.
         """
+        self._vlog("sample_tex_slat [start]")
         if self.low_vram:
             cond = self._cond_to(cond, self.device)                                                   
         # Sample structured latent
@@ -804,7 +878,8 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         
         if self.low_vram:
             cond = self._cond_cpu(cond)
-            self._cleanup_cuda()                         
+            self._cleanup_cuda()
+        self._vlog("sample_tex_slat [end]")
         return slat
 
     def decode_tex_slat(self, slat: SparseTensor, subs: torch.Tensor = None) -> SparseTensor:
@@ -817,6 +892,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         Returns:
             SparseTensor: The decoded texture voxels
         """
+        self._vlog("decode_tex_slat [start]")
         # Comprehensive offload to ensure maximum VRAM for decoder
         self.move_all_to_cpu()
         

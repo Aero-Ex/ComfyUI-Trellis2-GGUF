@@ -787,7 +787,9 @@ class SparseUnetVaeDecoder(nn.Module):
         
         if use_tiled:
             # Tile decoding returns merged sparse features, skip returning subs since tiling is eval-only
-            out_h = self._tiled_forward(x, guide_subs=guide_subs)
+            tile_size = kwargs.pop('tile_size', 48)
+            tile_overlap = kwargs.pop('tile_overlap', 12)
+            out_h = self._tiled_forward(x, guide_subs=guide_subs, tile_size=tile_size, overlap=tile_overlap)
             return (out_h, []) if return_subs else out_h
 
         h = self.from_latent(x)
@@ -848,7 +850,7 @@ class SparseUnetVaeDecoder(nn.Module):
             else:
                 return h
                 
-    def _tiled_forward(self, x: sp.SparseTensor, guide_subs: Optional[List[sp.SparseTensor]] = None, tile_size: int = 120, overlap: int = 48) -> sp.SparseTensor:
+    def _tiled_forward(self, x: sp.SparseTensor, guide_subs: Optional[List[sp.SparseTensor]] = None, tile_size: int = 48, overlap: int = 12) -> sp.SparseTensor:
         """
         Forward pass with spatial chunking to save memory during decoding.
         We chunk the latent `x` and process it. Note that decoding upsamples, so the 
@@ -1030,6 +1032,12 @@ class SparseUnetVaeDecoder(nn.Module):
                         pbar.set_description(f"Tiled Decoding (Scale {out_scale})")
                         
                         del h, sub_x, sub_guide_subs
+                        # Clear flex_gemm neighbor caches accumulated inside every block
+                        # during this tile's forward pass — these are the non-PyTorch
+                        # VRAM allocations that send alloc to 4+ GB (Tot Alloc = 0 B).
+                        for m in self.modules():
+                            if hasattr(m, 'clear_neighbor_cache'):
+                                m.clear_neighbor_cache()
                         torch.cuda.empty_cache()
                         
                         v_after = torch.cuda.memory_allocated(target_device) / 1024**2

@@ -426,6 +426,9 @@ class Trellis2MeshWithVoxelGenerator:
                 "sparse_structure_resolution": ("INT", {"default":32,"min":8,"max":128,"step":8}),
                 "generate_texture_slat": ("BOOLEAN", {"default":True}),
                 "use_tiled_decoder": ("BOOLEAN", {"default":True}),
+                "shape_decoder_tile_size": ("INT", {"default": 48, "min": 16, "max": 256, "step": 8,
+                    "tooltip": "Latent tile size for shape decoder. Smaller = less VRAM peak, more tiles (48=~27 tiles, 120=1 tile)."}),
+                "shape_decoder_tile_overlap": ("INT", {"default": 12, "min": 0, "max": 64, "step": 4}),
             },
         }
 
@@ -435,7 +438,7 @@ class Trellis2MeshWithVoxelGenerator:
     CATEGORY = "Trellis2Wrapper"
     OUTPUT_NODE = True
 
-    def process(self, pipeline, image, seed, pipeline_type, sparse_structure_steps, shape_steps, texture_steps, max_num_tokens, max_views, sparse_structure_resolution, generate_texture_slat, use_tiled_decoder):
+    def process(self, pipeline, image, seed, pipeline_type, sparse_structure_steps, shape_steps, texture_steps, max_num_tokens, max_views, sparse_structure_resolution, generate_texture_slat, use_tiled_decoder, shape_decoder_tile_size=48, shape_decoder_tile_overlap=12):
         reset_cuda()
         
         images = tensor_batch_to_pil_list(image, max_views=max_views)
@@ -451,6 +454,10 @@ class Trellis2MeshWithVoxelGenerator:
             num_steps = 4
 
         pbar = ProgressBar(num_steps)        
+        
+        # Store shape decoder tile params on pipeline so decode_shape_slat picks them up
+        pipeline.shape_decoder_tile_size = shape_decoder_tile_size
+        pipeline.shape_decoder_tile_overlap = shape_decoder_tile_overlap
         
         mesh = pipeline.run(image=image_in, seed=seed, pipeline_type=pipeline_type, sparse_structure_sampler_params = sparse_structure_sampler_params, shape_slat_sampler_params = shape_slat_sampler_params, tex_slat_sampler_params = tex_slat_sampler_params, max_num_tokens = max_num_tokens, sparse_structure_resolution = sparse_structure_resolution, max_views = max_views, generate_texture_slat = generate_texture_slat, use_tiled=use_tiled_decoder, pbar=pbar)[0]
         
@@ -1287,7 +1294,7 @@ class Trellis2MeshWithVoxelAdvancedGenerator:
 
         pbar = ProgressBar(num_steps)
         
-        mesh = pipeline.run(image=image_in, seed=seed, pipeline_type=pipeline_type, sparse_structure_sampler_params = sparse_structure_sampler_params, shape_slat_sampler_params = shape_slat_sampler_params, tex_slat_sampler_params = tex_slat_sampler_params, max_num_tokens = max_num_tokens, sparse_structure_resolution = sparse_structure_resolution, max_views = max_views, generate_texture_slat=generate_texture_slat, use_tiled=use_tiled_decoder, pbar=pbar)[0]         
+        mesh = pipeline.run(image=image_in, seed=seed, pipeline_type=pipeline_type, sparse_structure_sampler_params = sparse_structure_sampler_params, shape_slat_sampler_params = shape_slat_sampler_params, tex_slat_sampler_params = tex_slat_sampler_params, max_num_tokens = max_num_tokens, sparse_structure_resolution = sparse_structure_resolution, max_views = max_views, generate_texture_slat=generate_texture_slat, use_tiled=use_tiled_decoder, pbar=pbar)[0]
         
         vertices = mesh.vertices.cuda()
         faces = mesh.faces.cuda()                
@@ -2074,9 +2081,32 @@ class Trellis2ReconstructMeshWithQuad:
         vertices = mesh.vertices.cuda().contiguous()
         faces = mesh.faces.cuda().contiguous()
         
+        # Build BVH first (it keeps its own internal copy of the mesh)
+        from cumesh.remeshing import cuBVH
+        bvh = cuBVH(vertices.detach().clone(), faces.detach().clone())
+        
+        # Free the raw tensors — the BVH is what dual contouring needs.
+        # Keeping these large tensors alive during the hashmap/grid_verts
+        # allocations wastes hundreds of MB and triggers OOM.
+        del vertices, faces
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+        v_alloc = torch.cuda.memory_allocated() / 1024**2
+        v_res = torch.cuda.memory_reserved() / 1024**2
+        print(f'[Trellis2] Reconstruction start — VRAM: alloc={v_alloc:.0f} MB, reserved={v_res:.0f} MB')
+
         # Perform Dual Contouring remeshing (rebuilds topology)
         print(f'Reconstructing mesh at resolution {resolution}...')
-        vertices, faces = CuMesh.remeshing.reconstruct_mesh_dc_quad(vertices, faces, resolution, verbose=True, remove_inner_faces = remove_inner_faces)
+        new_verts, new_faces = CuMesh.remeshing.reconstruct_mesh_dc_quad(
+            mesh.vertices,        # CPU tensors — only needed for bbox min/max (6 floats)
+            mesh.faces,
+            resolution, verbose=True,
+            bvh=bvh,
+            remove_inner_faces=remove_inner_faces
+        )
+        del bvh
+        torch.cuda.empty_cache()
+        vertices, faces = new_verts, new_faces
         
         if remove_floaters:
             vertices, faces = remove_floater2(vertices.cpu().numpy(), faces.cpu().numpy())

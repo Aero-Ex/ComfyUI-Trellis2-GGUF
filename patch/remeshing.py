@@ -1079,6 +1079,8 @@ def reconstruct_mesh_dc_quad(
     pts_vert = (grid_verts.float() / resolution - 0.5) * scale + center
     dist_vert = chunked_udf(bvh, pts_vert)
 
+    # Release reserved pool before the large grid_verts hashmap allocation
+    torch.cuda.empty_cache()
     hashmap_vert = _init_hashmap(resolution + 1, 2 * grid_verts.shape[0], device)
     _C.hashmap_insert_3d_idx_as_val_cuda(
         *hashmap_vert,
@@ -1092,6 +1094,10 @@ def reconstruct_mesh_dc_quad(
         dist_vert - eps,
         resolution + 1, resolution + 1, resolution + 1
     )
+    
+    # Aggressive cleanup of intermediate voxel-estimation tensors
+    del pts_vert, dist_vert, grid_verts, hashmap_vert
+    torch.cuda.empty_cache()
 
     # -------------------------------------------------------------------------
     # 6. Topology (quads)
@@ -1127,13 +1133,16 @@ def reconstruct_mesh_dc_quad(
 
     quad_indices = torch.cat(quad_list, dim=0)
     intersected_dir = torch.cat(dir_list, dim=0).int()
+    
+    # Cleanup topology intermediate tensors
+    del hashmap_vox, nz, quad_list, dir_list
+    torch.cuda.empty_cache()
 
     # -------------------------------------------------------------------------
     # 7. Re-index vertices
     # -------------------------------------------------------------------------
     print('Re-indexing vertices ...')
     # Free intermediate tensors before allocating active mask to avoid OOM
-    del pts_vert, dist_vert, grid_verts, hashmap_vert, nz
     torch.cuda.empty_cache()
     active = torch.zeros(Nvox, dtype=torch.bool, device=device)
     # Mark active indices in chunks to avoid large temporary flatten() allocation
