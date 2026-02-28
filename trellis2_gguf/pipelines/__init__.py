@@ -1,8 +1,8 @@
 import importlib
 
 __attributes = {
-    "Trellis2ImageTo3DPipeline": "trellis2_image_to_3d",
-    "Trellis2TexturingPipeline": "trellis2_texturing",
+    "Trellis2GGUFImageTo3DPipeline": "trellis2_gguf_image_to_3d",
+    "Trellis2GGUFTexturingPipeline": "trellis2_gguf_texturing",
 }
 
 __submodules = ['samplers', 'rembg']
@@ -48,5 +48,5 @@ def from_pretrained(path: str):
 # For PyLance
 if __name__ == '__main__':
     from . import samplers, rembg
-    from .trellis2_image_to_3d import Trellis2ImageTo3DPipeline
-    from .trellis2_texturing import Trellis2TexturingPipeline
+    from .trellis2_gguf_image_to_3d import Trellis2GGUFImageTo3DPipeline
+    from .trellis2_gguf_texturing import Trellis2GGUFTexturingPipeline

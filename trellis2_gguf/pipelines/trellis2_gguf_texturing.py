@@ -15,9 +15,9 @@ import cv2
 import flex_gemm
 
 
-class Trellis2TexturingPipeline(Pipeline):
+class Trellis2GGUFTexturingPipeline(Pipeline):
     """
-    Pipeline for inferring Trellis2 image-to-3D models.
+    Pipeline for inferring Trellis2GGUF image-to-3D models.
 
     Args:
         models (dict[str, nn.Module]): The models to use in the pipeline.
@@ -66,7 +66,7 @@ class Trellis2TexturingPipeline(Pipeline):
         self._device = 'cpu'
 
     @classmethod
-    def from_pretrained(cls, path: str, config_file: str = "pipeline.json") -> "Trellis2TexturingPipeline":
+    def from_pretrained(cls, path: str, config_file: str = "pipeline.json") -> "Trellis2GGUFTexturingPipeline":
         """
         Load a pretrained model.
 
@@ -290,6 +290,8 @@ class Trellis2TexturingPipeline(Pipeline):
         pbr_voxel: SparseTensor,
         resolution: int = 1024,
         texture_size: int = 1024,
+        xatlas_compute_charts_kwargs = None,
+        xatlas_pack_charts_kwargs = None,
     ) -> trimesh.Trimesh:
         vertices = mesh.vertices
         faces = mesh.faces
@@ -303,7 +305,29 @@ class Trellis2TexturingPipeline(Pipeline):
         else:
             _cumesh = cumesh.CuMesh()
             _cumesh.init(vertices_torch, faces_torch)
-            vertices_torch, faces_torch, uvs_torch, vmap = _cumesh.uv_unwrap(return_vmaps=True)
+            _xatlas_compute_charts_kwargs = {
+                "max_iterations": 1,
+                "max_cost": 20.0,
+                "normal_deviation_weight": 0.0,
+                "roundness_weight": 0.0,
+                "straightness_weight": 0.0,
+                "normal_seam_weight": 0.0,
+                "texture_seam_weight": 0.0,
+            }
+            if xatlas_compute_charts_kwargs is not None:
+                _xatlas_compute_charts_kwargs.update(xatlas_compute_charts_kwargs)
+
+            _xatlas_pack_charts_kwargs = {
+                "max_iterations": 1,
+            }
+            if xatlas_pack_charts_kwargs is not None:
+                _xatlas_pack_charts_kwargs.update(xatlas_pack_charts_kwargs)
+
+            vertices_torch, faces_torch, uvs_torch, vmap = _cumesh.uv_unwrap(
+                xatlas_compute_charts_kwargs=_xatlas_compute_charts_kwargs,
+                xatlas_pack_charts_kwargs=_xatlas_pack_charts_kwargs,
+                return_vmaps=True
+            )
             vertices_torch = vertices_torch.cuda()
             faces_torch = faces_torch.cuda()
             uvs_torch = uvs_torch.cuda()
@@ -381,6 +405,8 @@ class Trellis2TexturingPipeline(Pipeline):
         preprocess_image: bool = True,
         resolution: int = 1024,
         texture_size: int = 2048,
+        xatlas_compute_charts_kwargs = None,
+        xatlas_pack_charts_kwargs = None,
     ) -> trimesh.Trimesh:
         """
         Run the pipeline.
@@ -404,5 +430,5 @@ class Trellis2TexturingPipeline(Pipeline):
             shape_slat, tex_slat_sampler_params
         )
         pbr_voxel = self.decode_tex_slat(tex_slat)
-        out_mesh = self.postprocess_mesh(mesh, pbr_voxel, resolution, texture_size)
+        out_mesh = self.postprocess_mesh(mesh, pbr_voxel, resolution, texture_size, xatlas_compute_charts_kwargs, xatlas_pack_charts_kwargs)
         return out_mesh

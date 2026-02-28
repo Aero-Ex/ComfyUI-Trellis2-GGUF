@@ -1,13 +1,13 @@
 """
 model_manager.py
 ================
-Single source of truth for all Trellis2 model file management.
+Single source of truth for all Trellis2GGUF model file management.
 
 - File resolution: given a model basename and format, returns the absolute local path.
-- Downloading: downloads missing files from HuggingFace into models/Trellis2.
-- ONLY called from Trellis2LoadModel.process in nodes.py — no other code should download.
+- Downloading: downloads missing files from HuggingFace into models/Trellis2GGUF.
+- ONLY called from Trellis2GGUFLoadModel.process in nodes.py — no other code should download.
 
-All other internal code (trellis2/models/__init__.py etc.) calls `resolve_local_path` only,
+All other internal code (trellis2_gguf/models/__init__.py etc.) calls `resolve_local_path` only,
 which does a pure local lookup and raises FileNotFoundError if the file is missing.
 """
 
@@ -47,8 +47,8 @@ ENC_DEC_PREFIXES = ("ss_dec_", "shape_dec_", "tex_dec_", "shape_enc_", "tex_enc_
 
 
 def get_models_dir() -> str:
-    """Absolute path to models/Trellis2."""
-    return os.path.join(folder_paths.models_dir, "Trellis2")
+    """Absolute path to models/Trellis2GGUF."""
+    return os.path.join(folder_paths.models_dir, "Trellis2GGUF")
 
 
 def remote_path(basename: str, suffix: str) -> str:
@@ -74,8 +74,8 @@ def _candidate_paths(basename: str, suffix: str) -> list[str]:
     """
     Return all local candidate paths for a given model file, in priority order.
     Searches:
-      1. Flat root:  models/Trellis2/<basename><suffix>
-      2. Nested:     models/Trellis2/<folder>/<basename><suffix>   (Aero-Ex layout)
+      1. Flat root:  models/Trellis2GGUF/<basename><suffix>
+      2. Nested:     models/Trellis2GGUF/<folder>/<basename><suffix>   (Aero-Ex layout)
     """
     root = get_models_dir()
     nested = remote_path(basename, suffix)
@@ -131,12 +131,12 @@ def resolve_local_path(basename: str, enable_gguf: bool = False, gguf_quant: str
     raise FileNotFoundError(
         f"Model not found locally: {basename} "
         f"(gguf={enable_gguf}, quant={gguf_quant}, precision={precision}). "
-        f"Run Trellis2LoadModel first to download all required files."
+        f"Run Trellis2GGUFLoadModel first to download all required files."
     )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Downloader  (called ONLY from Trellis2LoadModel.process in nodes.py)
+# Downloader  (called ONLY from Trellis2GGUFLoadModel.process in nodes.py)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def ensure_model_files(
@@ -145,7 +145,7 @@ def ensure_model_files(
 ) -> dict:
     """
     Download all required model files if not present locally.
-    Called once during Trellis2LoadModel.process.
+    Called once during Trellis2GGUFLoadModel.process.
 
     Args:
         model_format: e.g. "GGUF Q6_K", "Safetensors (BF16)", "Safetensors (FP8)"

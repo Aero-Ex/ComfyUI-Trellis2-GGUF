@@ -1,20 +1,18 @@
 [project]
-name = "trellis2"
+name = "trellis2_gguf"
 description = "ComfyUI Wrapper for Microsoft Trellis.2 - Native and Compact Structured Latents for 3D Generation"
-version = "1.0.11"
+version = "0.0.1"
 license = {file = "LICENSE"} 
 
 dependencies = ["meshlib", "requests", "pymeshlab", "opencv-python", "scipy", "open3d", "plotly", "trimesh", "rembg"]
 
 [project.urls]
-Repository = "https://github.com/visualbruno/ComfyUI-Trellis2"
+Repository = "https://github.com/Aero-Ex/ComfyUI-Trellis2-GGUF"
 #  Used by Comfy Registry https://registry.comfy.org
-Documentation = "https://github.com/visualbruno/ComfyUI-Trellis2/wiki"
-"Bug Tracker" = "https://github.com/visualbruno/ComfyUI-Trellis2/issues"
+"Bug Tracker" = "https://github.com/Aero-Ex/ComfyUI-Trellis2-GGUF"
 
 [tool.comfy]
-PublisherId = "visualbruno"
+PublisherId = "aerox"
 DisplayName = "ComfyUI-Trellis2-GGUF"
 Icon = ""
 includes = [] 
-# "requires-comfyui" = ">=1.0.0"  # ComfyUI version compatibility

@@ -687,7 +687,8 @@ def remesh_narrow_band_dc_quad(
     bvh=None,
     remove_inner_faces: bool = True,  # now quad-level
 ):
-    device = vertices.device
+    device = center.device
+    from .bvh import cuBVH
 
     # -------------------------------------------------------------------------
     # 1. Constants
@@ -715,15 +716,16 @@ def remesh_narrow_band_dc_quad(
     # -------------------------------------------------------------------------
     # 2. Helpers
     # -------------------------------------------------------------------------
-    def chunked_udf(bvh_ptr, pts):
+    def chunked_udf(bvh_ptr, pts, return_faces=False):
         N = pts.shape[0]
         dist = torch.empty(N, dtype=torch.float32, device=device)
-        face = torch.empty(N, dtype=torch.int64, device=device)
+        face = torch.empty(N, dtype=torch.int64, device=device) if return_faces else None
         for i in range(0, N, chunk_size):
             end = min(i + chunk_size, N)
             d, f, _ = bvh_ptr.unsigned_distance(pts[i:end])
             dist[i:end] = d
-            face[i:end] = f
+            if return_faces:
+                face[i:end] = f
         return dist, face
 
     def chunked_sdf_raystab(bvh_ptr, pts):
@@ -769,44 +771,109 @@ def remesh_narrow_band_dc_quad(
             break
 
         base_res *= 2
-        coords = (coords.unsqueeze(1) * 2 + OFFSETS.unsqueeze(0)).reshape(-1, 3)
-        coords = torch.unique(coords, dim=0)
+        
+        # Chunked voxel expansion to avoid OOM on large grids
+        expand_chunk_size = 250_000  # Process 250K coords at a time
+        if coords.shape[0] <= expand_chunk_size:
+            coords = (coords.unsqueeze(1) * 2 + OFFSETS.unsqueeze(0)).reshape(-1, 3)
+            coords = torch.unique(coords, dim=0)
+        else:
+            # Process in chunks with progressive deduplication
+            result_coords = None
+            for i in range(0, coords.shape[0], expand_chunk_size):
+                end = min(i + expand_chunk_size, coords.shape[0])
+                chunk = coords[i:end]
+                expanded = (chunk.unsqueeze(1) * 2 + OFFSETS.unsqueeze(0)).reshape(-1, 3)
+                if result_coords is None:
+                    result_coords = expanded
+                else:
+                    result_coords = torch.cat([result_coords, expanded], dim=0)
+                del expanded
+                # Deduplicate every 4 chunks to keep memory bounded
+                if (i // expand_chunk_size + 1) % 4 == 0 or end >= coords.shape[0]:
+                    result_coords = torch.unique(result_coords, dim=0)
+                    torch.cuda.empty_cache() if device.type == 'cuda' else None
+            coords = result_coords
+            del result_coords
     pbar.close()
+    torch.cuda.empty_cache()
 
     # -------------------------------------------------------------------------
     # 4. Dual Contouring
     # -------------------------------------------------------------------------
     print('Dual Contouring ...')
+    # Chunked hashmap insertion to avoid massive concat spike
     Nvox = coords.shape[0]
+    if verbose: print(f"Processing {Nvox:,} voxels ...")
+    coords_cpu = coords.cpu()
+    del coords # Free GPU coords
+    torch.cuda.empty_cache()
 
     hashmap_vox = _init_hashmap(resolution, 2 * Nvox, device)
-    _C.hashmap_insert_3d_idx_as_val_cuda(
-        *hashmap_vox,
-        torch.cat([torch.zeros_like(coords[:, :1]), coords], dim=1),
-        resolution, resolution, resolution
-    )
-
+    for i in range(0, coords_cpu.shape[0], chunk_size):
+        end = min(i + chunk_size, coords_cpu.shape[0])
+        chunk = coords_cpu[i:end].to(device)
+        keys = torch.cat([torch.zeros_like(chunk[:, :1]), chunk], dim=1)
+        _C.hashmap_insert_3d_idx_as_val_cuda(
+            *hashmap_vox, keys,
+            resolution, resolution, resolution
+        )
+        del keys, chunk
+    
+    # Use CPU coords for the active vertices kernel
     grid_verts = _C.get_sparse_voxel_grid_active_vertices(
-        *hashmap_vox, coords.contiguous(),
+        *hashmap_vox, coords_cpu.to(device),
         resolution, resolution, resolution
-    )
+    ).cpu()
+    
+    # Offload first hashmap to CPU immediately after building vertices
+    hashmap_vox_cpu = [t.cpu() for t in hashmap_vox]
+    del hashmap_vox
+    torch.cuda.empty_cache()
 
-    pts_vert = (grid_verts.float() / resolution - 0.5) * scale + center
-    dist_vert, _ = chunked_udf(bvh, pts_vert)
+    # Chunked coordinate conversion
+    pts_vert = torch.empty((grid_verts.shape[0], 3), dtype=torch.float32, device=device)
+    for i in range(0, grid_verts.shape[0], chunk_size):
+        end = min(i + grid_verts.shape[0], grid_verts.shape[0]) if False else min(i + chunk_size, grid_verts.shape[0])
+        chunk_gpu = grid_verts[i:end].to(device).float()
+        pts_vert[i:end] = (chunk_gpu / resolution - 0.5) * scale + center
+        del chunk_gpu
+    
+    dist_vert, _ = chunked_udf(bvh, pts_vert, return_faces=False)
+    del pts_vert
+    torch.cuda.empty_cache()
 
     hashmap_vert = _init_hashmap(resolution + 1, 2 * grid_verts.shape[0], device)
-    _C.hashmap_insert_3d_idx_as_val_cuda(
-        *hashmap_vert,
-        torch.cat([torch.zeros_like(grid_verts[:, :1]), grid_verts], dim=1),
-        resolution + 1, resolution + 1, resolution + 1
-    )
+    for i in range(0, grid_verts.shape[0], chunk_size):
+        end = min(i + chunk_size, grid_verts.shape[0])
+        chunk = grid_verts[i:end].to(device)
+        keys = torch.cat([torch.zeros_like(chunk[:, :1]), chunk], dim=1)
+        _C.hashmap_insert_3d_idx_as_val_cuda(
+            *hashmap_vert, keys,
+            resolution + 1, resolution + 1, resolution + 1
+        )
+        del keys, chunk
+    
+    del grid_verts # Free grid_verts
+    
+    # BVH Offloading for 20M+ faces
+    # The BVH takes massive VRAM (~1.3GB for 20M faces). 
+    # We delete it before the Dual Contouring kernel and rebuild it later if needed.
+    del bvh
+    bvh = None
+    torch.cuda.empty_cache()
 
+    # Move coords back to GPU for contouring
+    coords_gpu = coords_cpu.to(device)
+    dist_vert.sub_(eps) # In-place subtraction to save 300MB spike
     dual_verts, intersected = _C.simple_dual_contour(
         *hashmap_vert,
-        coords,
-        dist_vert - eps,
+        coords_gpu,
+        dist_vert,
         resolution + 1, resolution + 1, resolution + 1
     )
+    del dist_vert, hashmap_vert, coords_gpu
+    torch.cuda.empty_cache()
 
     # -------------------------------------------------------------------------
     # 5. Topology (quads)
@@ -815,10 +882,14 @@ def remesh_narrow_band_dc_quad(
     quad_list, dir_list = [], []
     nz = torch.nonzero(intersected)
 
+    # Bring back first hashmap for lookup
+    hashmap_vox = [t.to(device) for t in hashmap_vox_cpu]
+    coords_gpu = coords_cpu.to(device)
+    
     for i in range(0, nz.shape[0], chunk_size):
         c = nz[i:i + chunk_size]
         v_idx, a_idx = c[:, 0], c[:, 1]
-        neigh = coords[v_idx].unsqueeze(1) + edge_neighbor_voxel_offset[0, a_idx]
+        neigh = coords_gpu[v_idx].unsqueeze(1) + edge_neighbor_voxel_offset[0, a_idx]
         keys = torch.cat(
             [torch.zeros((neigh.shape[0] * 4, 1), dtype=torch.int32, device=device),
              neigh.reshape(-1, 3)],
@@ -831,8 +902,8 @@ def remesh_narrow_band_dc_quad(
 
         mask = (lookup != 0xffffffff).all(dim=1)
         if mask.any():
-            quad_list.append(lookup[mask])
-            dir_list.append(intersected[v_idx[mask], a_idx[mask]])
+            quad_list.append(lookup[mask].cpu())
+            dir_list.append(intersected[v_idx[mask], a_idx[mask]].cpu())
 
     if not quad_list:
         return (
@@ -842,14 +913,12 @@ def remesh_narrow_band_dc_quad(
 
     quad_indices = torch.cat(quad_list, dim=0)
     intersected_dir = torch.cat(dir_list, dim=0).int()
-
-    # -------------------------------------------------------------------------
-    # 6. Re-index vertices
-    # -------------------------------------------------------------------------
-    print('Re-indexing vertices ...')
-    # Free intermediate tensors before allocating active mask to avoid OOM
-    del pts_vert, dist_vert, grid_verts, hashmap_vert, nz
+    del quad_list, dir_list, intersected, hashmap_vox, coords_gpu
     torch.cuda.empty_cache()
+
+    # Re-indexing on CPU to save VRAM
+    device_gpu = device
+    device = torch.device('cpu')
     active = torch.zeros(Nvox, dtype=torch.bool, device=device)
     # Mark active indices in chunks to avoid large temporary flatten() allocation
     _reindex_chunk = 524_288
@@ -863,16 +932,29 @@ def remesh_narrow_band_dc_quad(
         device=device
     )
 
-    dual_verts = dual_verts[active]
+    dual_verts = dual_verts.cpu()[active]
     for i in range(0, quad_indices.shape[0], chunk_size):
         end = min(i + chunk_size, quad_indices.shape[0])
-        quad_indices[i:end] = vert_map[quad_indices[i:end]]
+        quad_indices[i:end] = vert_map[quad_indices[i:end].long()]
 
-    mesh_vertices = (dual_verts / resolution - 0.5) * scale + center
+    mesh_vertices = (dual_verts / resolution - 0.5) * scale + center.cpu()
+    
+    # Back to GPU for final filtering
+    device = device_gpu
+    quad_indices = quad_indices.to(device)
+    intersected_dir = intersected_dir.to(device)
+    mesh_vertices = mesh_vertices.to(device)
+    del nz
+    torch.cuda.empty_cache()
 
     # -------------------------------------------------------------------------
-    # 7. 🔥 QUAD-LEVEL INNER / OUTER FILTERING (ULTIMATE FIX)
+    # 7. QUAD-LEVEL INNER / OUTER FILTERING
     # -------------------------------------------------------------------------
+    # Rebuild BVH only if inner removal is needed
+    if remove_inner_faces and bvh is None:
+        if verbose: print("Rebuilding BVH for Inner Layer removal...")
+        bvh = cuBVH(vertices.to(device_gpu), faces.to(device_gpu))
+
     if remove_inner_faces:
         print(f"Removing Inner Layer for {quad_indices.shape[0]} quads ...")
         quad_centers = torch.empty(
@@ -1054,9 +1136,32 @@ def reconstruct_mesh_dc_quad(
             break
 
         base_res *= 2
-        coords = (coords.unsqueeze(1) * 2 + OFFSETS.unsqueeze(0)).reshape(-1, 3)
-        coords = torch.unique(coords, dim=0)
+        
+        # Chunked voxel expansion to avoid OOM on large grids
+        expand_chunk_size = 250_000  # Process 250K coords at a time
+        if coords.shape[0] <= expand_chunk_size:
+            coords = (coords.unsqueeze(1) * 2 + OFFSETS.unsqueeze(0)).reshape(-1, 3)
+            coords = torch.unique(coords, dim=0)
+        else:
+            # Process in chunks with progressive deduplication
+            result_coords = None
+            for i in range(0, coords.shape[0], expand_chunk_size):
+                end = min(i + expand_chunk_size, coords.shape[0])
+                chunk = coords[i:end]
+                expanded = (chunk.unsqueeze(1) * 2 + OFFSETS.unsqueeze(0)).reshape(-1, 3)
+                if result_coords is None:
+                    result_coords = expanded
+                else:
+                    result_coords = torch.cat([result_coords, expanded], dim=0)
+                del expanded
+                # Deduplicate every 4 chunks to keep memory bounded
+                if (i // expand_chunk_size + 1) % 4 == 0 or end >= coords.shape[0]:
+                    result_coords = torch.unique(result_coords, dim=0)
+                    torch.cuda.empty_cache() if device.type == 'cuda' else None
+            coords = result_coords
+            del result_coords
     pbar.close()
+    torch.cuda.empty_cache()
 
     # -------------------------------------------------------------------------
     # 5. Dual contouring
@@ -1064,20 +1169,32 @@ def reconstruct_mesh_dc_quad(
     print('Dual Contouring ...')
     Nvox = coords.shape[0]
 
+    # Chunked hashmap insertion to avoid massive concat spike
     hashmap_vox = _init_hashmap(resolution, 2 * Nvox, device)
-    _C.hashmap_insert_3d_idx_as_val_cuda(
-        *hashmap_vox,
-        torch.cat([torch.zeros_like(coords[:, :1]), coords], dim=1),
-        resolution, resolution, resolution
-    )
+    for i in range(0, coords.shape[0], chunk_size):
+        end = min(i + chunk_size, coords.shape[0])
+        chunk = coords[i:end]
+        keys = torch.cat([torch.zeros_like(chunk[:, :1]), chunk], dim=1)
+        _C.hashmap_insert_3d_idx_as_val_cuda(
+            *hashmap_vox, keys,
+            resolution, resolution, resolution
+        )
+        del keys
 
     grid_verts = _C.get_sparse_voxel_grid_active_vertices(
         *hashmap_vox, coords.contiguous(),
         resolution, resolution, resolution
     )
 
-    pts_vert = (grid_verts.float() / resolution - 0.5) * scale + center
+    # Chunked coordinate conversion to avoid massive float32 spike
+    pts_vert = torch.empty((grid_verts.shape[0], 3), dtype=torch.float32, device=device)
+    for i in range(0, grid_verts.shape[0], chunk_size):
+        end = min(i + chunk_size, grid_verts.shape[0])
+        pts_vert[i:end] = (grid_verts[i:end].float() / resolution - 0.5) * scale + center
+    
     dist_vert = chunked_udf(bvh, pts_vert)
+    del pts_vert # Free memory immediately
+    torch.cuda.empty_cache()
 
     # Release reserved pool before the large grid_verts hashmap allocation
     torch.cuda.empty_cache()
@@ -1165,7 +1282,7 @@ def reconstruct_mesh_dc_quad(
     mesh_vertices = (dual_verts / resolution - 0.5) * scale + center
 
     # -------------------------------------------------------------------------
-    # 8. 🔥 QUAD-LEVEL INNER / OUTER FILTERING
+    # 8.QUAD-LEVEL INNER / OUTER FILTERING
     # -------------------------------------------------------------------------
     if remove_inner_faces:
         print(f"Removing Inner Layer for {quad_indices.shape[0]} quads ...")

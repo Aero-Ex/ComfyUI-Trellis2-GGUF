@@ -38,8 +38,12 @@ import comfy.model_management as mm
 from comfy.utils import load_torch_file, ProgressBar, common_upscale
 import comfy.utils
 
-from .trellis2.pipelines import Trellis2ImageTo3DPipeline
-from .trellis2.representations import Mesh, MeshWithVoxel
+try:
+    from .trellis2_gguf.pipelines import Trellis2GGUFImageTo3DPipeline
+    from .trellis2_gguf.representations import Mesh, MeshWithVoxel
+except (ImportError, ValueError):
+    from trellis2_gguf.pipelines import Trellis2GGUFImageTo3DPipeline
+    from trellis2_gguf.representations import Mesh, MeshWithVoxel
 
 script_directory = os.path.dirname(os.path.abspath(__file__))
 comfy_path = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
@@ -279,7 +283,7 @@ def pymeshlab_remove_floater(mesh: pymeshlab.MeshSet):
     mesh.apply_filter("meshing_remove_selected_vertices_and_faces")
     return mesh 
     
-def _batched_unsigned_distance(bvh, positions, batch_size=100000, return_uvw=False):
+def _batched_unsigned_distance(bvh, positions, batch_size=65536, return_uvw=False):
     """
     Batch unsigned_distance queries to avoid GPU kernel timeout on large meshes.
     When processing high-resolution textures (e.g., 2048x2048 = ~4M pixels) on complex
@@ -317,7 +321,7 @@ def _batched_unsigned_distance(bvh, positions, batch_size=100000, return_uvw=Fal
         torch.cat(uvw_list) if return_uvw else None
     )    
 
-class Trellis2LoadModel:
+class Trellis2GGUFLoadModel:
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -338,10 +342,10 @@ class Trellis2LoadModel:
             },
         }
 
-    RETURN_TYPES = ("TRELLIS2PIPELINE", )
+    RETURN_TYPES = ("TRELLIS2GGUFPIPELINE", )
     RETURN_NAMES = ("pipeline", )
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2-GGUF"
     OUTPUT_NODE = True
 
     def process(self, modelname, model_format, backend, device, low_vram, keep_models_loaded):
@@ -357,12 +361,12 @@ class Trellis2LoadModel:
         # ── Delegate ALL downloading to model_manager ─────────────────────
         import importlib.util, sys as _sys
         _mm_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "model_manager.py")
-        if "trellis2_model_manager" not in _sys.modules:
-            spec = importlib.util.spec_from_file_location("trellis2_model_manager", _mm_path)
+        if "trellis2_gguf_model_manager" not in _sys.modules:
+            spec = importlib.util.spec_from_file_location("trellis2_gguf_model_manager", _mm_path)
             _mm = importlib.util.module_from_spec(spec)
-            _sys.modules["trellis2_model_manager"] = _mm
+            _sys.modules["trellis2_gguf_model_manager"] = _mm
             spec.loader.exec_module(_mm)
-        model_manager = _sys.modules["trellis2_model_manager"]
+        model_manager = _sys.modules["trellis2_gguf_model_manager"]
 
         model_path = model_manager.get_models_dir()
 
@@ -371,7 +375,7 @@ class Trellis2LoadModel:
         pipeline_json_local = os.path.join(model_path, "pipeline.json")
         if not os.path.exists(pipeline_json_local):
             from huggingface_hub import hf_hub_download
-            print(f"[Trellis2] Downloading pipeline.json from {model_manager.GGUF_REPO}...")
+            print(f"[Trellis2GGUF] Downloading pipeline.json from {model_manager.GGUF_REPO}...")
             hf_hub_download(repo_id=model_manager.GGUF_REPO, filename="pipeline.json", local_dir=model_path)
 
         with open(pipeline_json_local, 'r') as f:
@@ -387,7 +391,7 @@ class Trellis2LoadModel:
         if "(BF16)" in model_format: precision = "bf16"
         elif "(FP8)" in model_format: precision = "fp8"
 
-        pipeline = Trellis2ImageTo3DPipeline.from_pretrained(
+        pipeline = Trellis2GGUFImageTo3DPipeline.from_pretrained(
             model_path,
             keep_models_loaded=keep_models_loaded,
             enable_gguf=enable_gguf,
@@ -409,12 +413,12 @@ class Trellis2LoadModel:
 
 
         
-class Trellis2MeshWithVoxelGenerator:
+class Trellis2GGUFMeshWithVoxelGenerator:
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
-                "pipeline": ("TRELLIS2PIPELINE",),
+                "pipeline": ("TRELLIS2GGUFPIPELINE",),
                 "image": ("IMAGE",),                
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0x7fffffff}),
                 "pipeline_type": (["512","1024","1024_cascade","1536_cascade"],{"default":"1024_cascade"}),
@@ -429,16 +433,19 @@ class Trellis2MeshWithVoxelGenerator:
                 "shape_decoder_tile_size": ("INT", {"default": 48, "min": 16, "max": 256, "step": 8,
                     "tooltip": "Latent tile size for shape decoder. Smaller = less VRAM peak, more tiles (48=~27 tiles, 120=1 tile)."}),
                 "shape_decoder_tile_overlap": ("INT", {"default": 12, "min": 0, "max": 64, "step": 4}),
+                "use_tiled_decoder_for_texture": ("BOOLEAN", {"default": False}),
+                "texture_decoder_tile_size": ("INT", {"default": 120, "min": 32, "max": 1024}),
+                "texture_decoder_tile_overlap": ("INT", {"default": 48, "min": 0, "max": 256}),
             },
         }
 
     RETURN_TYPES = ("MESHWITHVOXEL", "BVH", )
     RETURN_NAMES = ("mesh", "bvh", )
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2-GGUF"
     OUTPUT_NODE = True
 
-    def process(self, pipeline, image, seed, pipeline_type, sparse_structure_steps, shape_steps, texture_steps, max_num_tokens, max_views, sparse_structure_resolution, generate_texture_slat, use_tiled_decoder, shape_decoder_tile_size=48, shape_decoder_tile_overlap=12):
+    def process(self, pipeline, image, seed, pipeline_type, sparse_structure_steps, shape_steps, texture_steps, max_num_tokens, max_views, sparse_structure_resolution, generate_texture_slat, use_tiled_decoder, shape_decoder_tile_size=48, shape_decoder_tile_overlap=12, use_tiled_decoder_for_texture=False, texture_decoder_tile_size=120, texture_decoder_tile_overlap=48):
         reset_cuda()
         
         images = tensor_batch_to_pil_list(image, max_views=max_views)
@@ -458,6 +465,9 @@ class Trellis2MeshWithVoxelGenerator:
         # Store shape decoder tile params on pipeline so decode_shape_slat picks them up
         pipeline.shape_decoder_tile_size = shape_decoder_tile_size
         pipeline.shape_decoder_tile_overlap = shape_decoder_tile_overlap
+        pipeline.use_tiled_decoder_for_texture = use_tiled_decoder_for_texture
+        pipeline.tiled_decoder_size = texture_decoder_tile_size
+        pipeline.tiled_decoder_overlap = texture_decoder_tile_overlap
         
         mesh = pipeline.run(image=image_in, seed=seed, pipeline_type=pipeline_type, sparse_structure_sampler_params = sparse_structure_sampler_params, shape_slat_sampler_params = shape_slat_sampler_params, tex_slat_sampler_params = tex_slat_sampler_params, max_num_tokens = max_num_tokens, sparse_structure_resolution = sparse_structure_resolution, max_views = max_views, generate_texture_slat = generate_texture_slat, use_tiled=use_tiled_decoder, pbar=pbar)[0]
         
@@ -467,7 +477,7 @@ class Trellis2MeshWithVoxelGenerator:
         # Build BVH for the current mesh to guide remeshing
         if generate_texture_slat:
             print("Building BVH for current mesh...")
-            bvh = CuMesh.cuBVH(vertices.detach().clone(), faces.detach().clone())           
+            bvh = CuMesh.cuBVH(vertices, faces)           
             bvh.vertices = vertices.detach().clone()
             bvh.faces = faces.detach().clone()
         else:
@@ -476,7 +486,7 @@ class Trellis2MeshWithVoxelGenerator:
         
         return (mesh, bvh,)    
 
-class Trellis2LoadImageWithTransparency:
+class Trellis2GGUFLoadImageWithTransparency:
     @classmethod
     def INPUT_TYPES(s):
         input_dir = folder_paths.get_input_directory()
@@ -486,7 +496,7 @@ class Trellis2LoadImageWithTransparency:
                     {"image": (sorted(files), {"image_upload": True})},
                 }
 
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2-GGUF"
 
     RETURN_TYPES = ("IMAGE", "MASK", "IMAGE", )
     RETURN_NAMES = ("image", "mask", "image_with_alpha")
@@ -558,7 +568,7 @@ class Trellis2LoadImageWithTransparency:
 
         return True  
 
-class Trellis2SimplifyMesh:
+class Trellis2GGUFSimplifyMesh:
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -572,7 +582,7 @@ class Trellis2SimplifyMesh:
     RETURN_TYPES = ("MESHWITHVOXEL", )
     RETURN_NAMES = ("mesh", )
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2-GGUF"
     OUTPUT_NODE = True
 
     def process(self, mesh, target_face_num, method):        
@@ -586,7 +596,7 @@ class Trellis2SimplifyMesh:
         
         return (mesh_copy,)     
 
-class Trellis2SimplifyTrimesh:
+class Trellis2GGUFSimplifyTrimesh:
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -600,7 +610,7 @@ class Trellis2SimplifyTrimesh:
     RETURN_TYPES = ("TRIMESH", )
     RETURN_NAMES = ("trimesh", )
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2-GGUF"
     OUTPUT_NODE = True
 
     def process(self, trimesh, target_face_num, method):        
@@ -623,7 +633,7 @@ class Trellis2SimplifyTrimesh:
         
         return (mesh_copy,)   
 
-class Trellis2ProgressiveSimplify:
+class Trellis2GGUFProgressiveSimplify:
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -645,7 +655,7 @@ class Trellis2ProgressiveSimplify:
     RETURN_TYPES = ("TRIMESH", "MESHWITHVOXEL",)
     RETURN_NAMES = ("trimesh", "mesh", )
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2-GGUF"
     OUTPUT_NODE = True
 
     def process(self, max_edge_length, max_triangle_aspect_ratio, strategy, stabilizer, touch_near_boundary_edges, optimize_vertex_positions, angle_based_weights, trimesh = None, mesh = None):        
@@ -718,7 +728,7 @@ class Trellis2ProgressiveSimplify:
         
         return new_vertices, new_faces        
         
-class Trellis2MeshWithVoxelToTrimesh:
+class Trellis2GGUFMeshWithVoxelToTrimesh:
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -731,7 +741,7 @@ class Trellis2MeshWithVoxelToTrimesh:
     RETURN_TYPES = ("TRIMESH", )
     RETURN_NAMES = ("trimesh", )
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2-GGUF"
     OUTPUT_NODE = True
 
     def process(self, mesh, reorient_vertices):       
@@ -752,13 +762,13 @@ class Trellis2MeshWithVoxelToTrimesh:
         
         return (trimesh,)
         
-class Trellis2ExportMesh:
+class Trellis2GGUFExportMesh:
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
                 "trimesh": ("TRIMESH",),
-                "filename_prefix": ("STRING", {"default": "3D/Trellis2"}),
+                "filename_prefix": ("STRING", {"default": "3D/Trellis2GGUF"}),
                 "file_format": (["glb", "obj", "ply", "stl", "3mf", "dae"],),
             }
         }
@@ -766,7 +776,7 @@ class Trellis2ExportMesh:
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("glb_path",)
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2-GGUF"
     OUTPUT_NODE = True
 
     def process(self, trimesh, filename_prefix, file_format):        
@@ -787,7 +797,7 @@ class Trellis2ExportMesh:
         
         return (str(relative_path), )        
         
-class Trellis2PostProcessMesh:
+class Trellis2GGUFPostProcessMesh:
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -810,7 +820,7 @@ class Trellis2PostProcessMesh:
     RETURN_TYPES = ("MESHWITHVOXEL",)
     RETURN_NAMES = ("mesh",)
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2-GGUF"
     OUTPUT_NODE = True
 
     def process(self, 
@@ -923,7 +933,7 @@ class Trellis2PostProcessMesh:
                 
         return (mesh_copy,)
        
-class Trellis2UnWrapAndRasterizer:
+class Trellis2GGUFUnWrapAndRasterizer:
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -938,17 +948,19 @@ class Trellis2UnWrapAndRasterizer:
                 "double_side_material": ("BOOLEAN",{"default":False}),
                 "bake_on_vertices": ("BOOLEAN",{"default":False}),
                 "use_custom_normals": ("BOOLEAN",{"default":False}),
-                "bvh": ("BVH",),                
+                "bvh": ("BVH",),
+                "xatlas_max_iterations": ("INT",{"default":1, "min":1, "max":10}),
+                "xatlas_max_cost": ("FLOAT",{"default":20.0, "min":0.0, "max":1000.0, "step":0.1}),
             }
         }
 
     RETURN_TYPES = ("TRIMESH","IMAGE","IMAGE",)
     RETURN_NAMES = ("trimesh","base_color_texture", "metallic_roughness_texture",)
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2-GGUF"
     OUTPUT_NODE = True
 
-    def process(self, mesh, mesh_cluster_threshold_cone_half_angle_rad, mesh_cluster_refine_iterations, mesh_cluster_global_iterations, mesh_cluster_smooth_strength, texture_size, texture_alpha_mode, double_side_material, bake_on_vertices,use_custom_normals,bvh):
+    def process(self, mesh, mesh_cluster_threshold_cone_half_angle_rad, mesh_cluster_refine_iterations, mesh_cluster_global_iterations, mesh_cluster_smooth_strength, texture_size, texture_alpha_mode, double_side_material, bake_on_vertices,use_custom_normals,bvh, xatlas_max_iterations, xatlas_max_cost):
         mesh_copy = copy.deepcopy(mesh)
         
         aabb = [[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]]
@@ -1088,6 +1100,15 @@ class Trellis2UnWrapAndRasterizer:
                 "global_iterations": mesh_cluster_global_iterations,
                 "smooth_strength": mesh_cluster_smooth_strength,                
             },
+            xatlas_compute_charts_kwargs={
+                "max_iterations": xatlas_max_iterations,
+                "max_cost": xatlas_max_cost,
+                "normal_deviation_weight": 0.0,
+                "roundness_weight": 0.0,
+                "straightness_weight": 0.0,
+                "normal_seam_weight": 0.0,
+                "texture_seam_weight": 0.0,
+            },
             return_vmaps=True,
             verbose=True,
         )
@@ -1107,9 +1128,9 @@ class Trellis2UnWrapAndRasterizer:
         rast = torch.zeros((1, texture_size, texture_size, 4), device='cuda', dtype=torch.float32)
         
         # Rasterize in chunks to save memory
-        for i in range(0, out_faces.shape[0], 100000):
+        for i in range(0, out_faces.shape[0], 65536):
             rast_chunk, _ = dr.rasterize(
-                ctx, uvs_rast, out_faces[i:i+100000],
+                ctx, uvs_rast, out_faces[i:i+65536],
                 resolution=[texture_size, texture_size],
             )
             mask_chunk = rast_chunk[..., 3:4] > 0
@@ -1209,12 +1230,12 @@ class Trellis2UnWrapAndRasterizer:
                 
         return (textured_mesh, baseColorTexture, metallicRoughnessTexture, )
         
-class Trellis2MeshWithVoxelAdvancedGenerator:
+class Trellis2GGUFMeshWithVoxelAdvancedGenerator:
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
-                "pipeline": ("TRELLIS2PIPELINE",),
+                "pipeline": ("TRELLIS2GGUFPIPELINE",),
                 "image": ("IMAGE",),
                 "seed": ("INT", {"default": 12345, "min": 0, "max": 0x7fffffff}),
                 "pipeline_type": (["512","1024","1024_cascade","1536_cascade"],{"default":"1024_cascade"}),
@@ -1241,13 +1262,18 @@ class Trellis2MeshWithVoxelAdvancedGenerator:
                 "texture_guidance_interval_start": ("FLOAT",{"default":0.00,"min":0.00,"max":1.00,"step":0.01}),
                 "texture_guidance_interval_end": ("FLOAT",{"default":0.90,"min":0.00,"max":1.00,"step":0.01}),
                 "use_tiled_decoder": ("BOOLEAN", {"default":True}),
+                "shape_decoder_tile_size": ("INT", {"default": 48, "min": 16, "max": 256, "step": 8}),
+                "shape_decoder_tile_overlap": ("INT", {"default": 12, "min": 0, "max": 64, "step": 4}),
+                "use_tiled_decoder_for_texture": ("BOOLEAN", {"default": False}),
+                "texture_decoder_tile_size": ("INT", {"default": 120, "min": 32, "max": 1024}),
+                "texture_decoder_tile_overlap": ("INT", {"default": 48, "min": 0, "max": 256}),
             },
         }
 
     RETURN_TYPES = ("MESHWITHVOXEL","BVH", )
     RETURN_NAMES = ("mesh", "bvh", )
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2-GGUF"
     OUTPUT_NODE = True
 
     def process(self, pipeline, image, seed, pipeline_type, sparse_structure_steps, 
@@ -1273,6 +1299,11 @@ class Trellis2MeshWithVoxelAdvancedGenerator:
         texture_guidance_interval_start,
         texture_guidance_interval_end,
         use_tiled_decoder,
+        shape_decoder_tile_size=48,
+        shape_decoder_tile_overlap=12,
+        use_tiled_decoder_for_texture=False,
+        texture_decoder_tile_size=120,
+        texture_decoder_tile_overlap=48,
         ):
         reset_cuda()
         
@@ -1294,6 +1325,12 @@ class Trellis2MeshWithVoxelAdvancedGenerator:
 
         pbar = ProgressBar(num_steps)
         
+        pipeline.shape_decoder_tile_size = shape_decoder_tile_size
+        pipeline.shape_decoder_tile_overlap = shape_decoder_tile_overlap
+        pipeline.use_tiled_decoder_for_texture = use_tiled_decoder_for_texture
+        pipeline.tiled_decoder_size = texture_decoder_tile_size
+        pipeline.tiled_decoder_overlap = texture_decoder_tile_overlap
+
         mesh = pipeline.run(image=image_in, seed=seed, pipeline_type=pipeline_type, sparse_structure_sampler_params = sparse_structure_sampler_params, shape_slat_sampler_params = shape_slat_sampler_params, tex_slat_sampler_params = tex_slat_sampler_params, max_num_tokens = max_num_tokens, sparse_structure_resolution = sparse_structure_resolution, max_views = max_views, generate_texture_slat=generate_texture_slat, use_tiled=use_tiled_decoder, pbar=pbar)[0]
         
         vertices = mesh.vertices.cuda()
@@ -1302,7 +1339,7 @@ class Trellis2MeshWithVoxelAdvancedGenerator:
         if generate_texture_slat:
             # Build BVH for the current mesh to guide remeshing
             print("Building BVH for current mesh...")
-            bvh = CuMesh.cuBVH(vertices.detach().clone(), faces.detach().clone())           
+            bvh = CuMesh.cuBVH(vertices, faces)           
             bvh.vertices = vertices.detach().clone()
             bvh.faces = faces.detach().clone()
         else:
@@ -1311,12 +1348,12 @@ class Trellis2MeshWithVoxelAdvancedGenerator:
         
         return (mesh,bvh,)         
 
-class Trellis2MeshWithVoxelMultiViewGenerator:
+class Trellis2GGUFMeshWithVoxelMultiViewGenerator:
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
-                "pipeline": ("TRELLIS2PIPELINE",),
+                "pipeline": ("TRELLIS2GGUFPIPELINE",),
                 "front_image": ("IMAGE",),
                 "seed": ("INT", {"default": 12345, "min": 0, "max": 0x7fffffff}),
                 "pipeline_type": (["512","1024","1024_cascade","1536_cascade"],{"default":"1024_cascade"}),
@@ -1342,6 +1379,11 @@ class Trellis2MeshWithVoxelMultiViewGenerator:
                 "texture_guidance_interval_start": ("FLOAT",{"default":0.00,"min":0.00,"max":1.00,"step":0.01}),
                 "texture_guidance_interval_end": ("FLOAT",{"default":0.90,"min":0.00,"max":1.00,"step":0.01}),
                 "use_tiled_decoder": ("BOOLEAN", {"default":True}),
+                "shape_decoder_tile_size": ("INT", {"default": 48, "min": 16, "max": 256, "step": 8}),
+                "shape_decoder_tile_overlap": ("INT", {"default": 12, "min": 0, "max": 64, "step": 4}),
+                "use_tiled_decoder_for_texture": ("BOOLEAN", {"default": False}),
+                "texture_decoder_tile_size": ("INT", {"default": 120, "min": 32, "max": 1024}),
+                "texture_decoder_tile_overlap": ("INT", {"default": 48, "min": 0, "max": 256}),
                 "front_axis": (["z", "x"], {"default": "z"}),
                 "blend_temperature": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 10.0, "step": 0.1}),
             },
@@ -1355,7 +1397,7 @@ class Trellis2MeshWithVoxelMultiViewGenerator:
     RETURN_TYPES = ("MESHWITHVOXEL","BVH", )
     RETURN_NAMES = ("mesh", "bvh", )
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2-GGUF"
     OUTPUT_NODE = True
 
     def process(self, pipeline, front_image, seed, pipeline_type, sparse_structure_steps, 
@@ -1380,6 +1422,11 @@ class Trellis2MeshWithVoxelMultiViewGenerator:
         texture_guidance_interval_start,
         texture_guidance_interval_end,
         use_tiled_decoder,
+        shape_decoder_tile_size,
+        shape_decoder_tile_overlap,
+        use_tiled_decoder_for_texture,
+        texture_decoder_tile_size,
+        texture_decoder_tile_overlap,
         front_axis,
         blend_temperature,
         back_image=None,
@@ -1411,6 +1458,12 @@ class Trellis2MeshWithVoxelMultiViewGenerator:
 
         pbar = ProgressBar(num_steps)
         
+        pipeline.shape_decoder_tile_size = shape_decoder_tile_size
+        pipeline.shape_decoder_tile_overlap = shape_decoder_tile_overlap
+        pipeline.use_tiled_decoder_for_texture = use_tiled_decoder_for_texture
+        pipeline.tiled_decoder_size = texture_decoder_tile_size
+        pipeline.tiled_decoder_overlap = texture_decoder_tile_overlap
+
         mesh = pipeline.run_multiview(
             front=front_pil,
             back=back_pil,
@@ -1436,7 +1489,7 @@ class Trellis2MeshWithVoxelMultiViewGenerator:
         if generate_texture_slat:
             # Build BVH for the current mesh to guide remeshing
             print("Building BVH for current mesh...")
-            bvh = CuMesh.cuBVH(vertices.detach().clone(), faces.detach().clone())           
+            bvh = CuMesh.cuBVH(vertices, faces)           
             bvh.vertices = vertices.detach().clone()
             bvh.faces = faces.detach().clone()
         else:
@@ -1445,7 +1498,7 @@ class Trellis2MeshWithVoxelMultiViewGenerator:
         
         return (mesh,bvh,)
 
-class Trellis2PostProcessAndUnWrapAndRasterizer:
+class Trellis2GGUFPostProcessAndUnWrapAndRasterizer:
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -1470,25 +1523,54 @@ class Trellis2PostProcessAndUnWrapAndRasterizer:
                 "use_custom_normals":("BOOLEAN",{"default":False}),
                 "bvh": ("BVH",),
                 "remove_inner_faces": ("BOOLEAN",{"default":True}),
+                "xatlas_max_iterations": ("INT",{"default":1, "min":1, "max":10}),
+                "xatlas_max_cost": ("FLOAT",{"default":20.0, "min":0.0, "max":1000.0, "step":0.1}),
             }
         }
 
     RETURN_TYPES = ("TRIMESH","IMAGE","IMAGE",)
     RETURN_NAMES = ("trimesh","base_color_texture","metallic_roughness_texture",)
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2-GGUF"
     OUTPUT_NODE = True
 
-    def process(self, mesh, mesh_cluster_threshold_cone_half_angle_rad, mesh_cluster_refine_iterations, mesh_cluster_global_iterations, mesh_cluster_smooth_strength, texture_size, remesh, remesh_band, remesh_project, target_face_num, simplify_method, fill_holes, texture_alpha_mode, dual_contouring_resolution, double_side_material, remove_floaters, bake_on_vertices,use_custom_normals,bvh,remove_inner_faces):
+    def process(self, mesh, mesh_cluster_threshold_cone_half_angle_rad, mesh_cluster_refine_iterations, mesh_cluster_global_iterations, mesh_cluster_smooth_strength, texture_size, remesh, remesh_band, remesh_project, target_face_num, simplify_method, fill_holes, texture_alpha_mode, dual_contouring_resolution, double_side_material, remove_floaters, bake_on_vertices,use_custom_normals,bvh,remove_inner_faces, xatlas_max_iterations, xatlas_max_cost):
         pbar = ProgressBar(5 if not bake_on_vertices else 4)
-        mesh_copy = copy.deepcopy(mesh)
         
-        aabb = [[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]]
+        # 1. Immediate VRAM Offloading - Move everything to CPU at the start
+        mesh.attrs = mesh.attrs.cpu()
+        mesh.coords = mesh.coords.cpu()
+        mesh.vertices = mesh.vertices.cpu()
+        mesh.faces = mesh.faces.cpu()
+        
+        # Store metadata before we might lose access or move things
+        attr_layout = mesh.layout
+        voxel_size = mesh.voxel_size
+        
+        # Force free BVH immediately. We will rebuild it ONLY when needed for sampling.
+        # This gives maximum VRAM headroom for simplification and unwrapping.
+        if bvh is not None:
+            if hasattr(bvh, "impl"):
+                bvh.impl = None
+            # Store original vertices/faces for rebuilding if they aren't already available
+            bvh_verts_cpu = bvh.vertices.cpu()
+            bvh_faces_cpu = bvh.faces.cpu()
+            del bvh
+        else:
+            # If no bvh provided, use mesh's own
+            bvh_verts_cpu = mesh.vertices
+            bvh_faces_cpu = mesh.faces
+
+        torch.cuda.empty_cache()
+        gc.collect()
+        
+        # Use shallow copy to keep original mesh intact but avoid duplicating large voxel tensors on GPU
+        mesh_copy = copy.copy(mesh)
         
         attr_volume = mesh_copy.attrs
         coords = mesh_copy.coords
-        attr_layout = mesh_copy.layout
-        voxel_size = mesh_copy.voxel_size  
+        
+        aabb = [[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]]
         
         mesh_cluster_threshold_cone_half_angle_rad = np.radians(mesh_cluster_threshold_cone_half_angle_rad)
 
@@ -1523,20 +1605,28 @@ class Trellis2PostProcessAndUnWrapAndRasterizer:
         faces = mesh_copy.faces
         
         vertices = vertices.cuda()
-        faces = faces.cuda()                
+        faces = faces.cuda()
+        
+        torch.cuda.empty_cache()
+        gc.collect()
         
         # Initialize CUDA mesh handler
         cumesh = CuMesh.CuMesh()
         cumesh.init(vertices, faces)
         print(f"Current vertices: {cumesh.num_vertices}, faces: {cumesh.num_faces}")        
-            
+        
         pbar.update(1)
             
         print("Cleaning mesh...")        
         # --- Branch 1: Standard Pipeline (Simplification & Cleaning) ---
         if not remesh:            
+            # Free original tensors as cumesh has its own copy
+            del vertices, faces
+            torch.cuda.empty_cache()
+            gc.collect()
+            
             if simplify_method == 'Cumesh':
-                cumesh.simplify(target_face_num * 3, verbose=True)
+                cumesh.simplify(target_face_num, verbose=True)
             elif simplify_method == 'Meshlib':
                  # GPU -> CPU -> Meshlib -> CPU -> GPU
                 v, f = cumesh.read()
@@ -1577,6 +1667,13 @@ class Trellis2PostProcessAndUnWrapAndRasterizer:
                 resolution = int(dual_contouring_resolution)
             
             print('Performing Dual Contouring ...')
+            
+            # Rebuild BVH as it was deleted to save VRAM for cleaner memory flow
+            # We use the GPU vertices/faces that were just initialized into cumesh
+            temp_bvh = CuMesh.bvh.cuBVH(vertices, faces)
+            temp_bvh.vertices = vertices
+            temp_bvh.faces = faces
+
             # Perform Dual Contouring remeshing (rebuilds topology)
             cumesh.init(*CuMesh.remeshing.remesh_narrow_band_dc_quad(
                 vertices, faces,
@@ -1587,8 +1684,15 @@ class Trellis2PostProcessAndUnWrapAndRasterizer:
                 project_back = remesh_project, # Snaps vertices back to original surface
                 verbose = True,
                 remove_inner_faces = remove_inner_faces,
-                #bvh = bvh,
+                bvh = temp_bvh,
             ))
+            
+            del temp_bvh
+            
+            # Free original tensors as cumesh has its own copy of the remeshed result
+            del vertices, faces
+            torch.cuda.empty_cache()
+            gc.collect()
             
             new_vertices, new_faces = cumesh.read()
             
@@ -1669,19 +1773,38 @@ class Trellis2PostProcessAndUnWrapAndRasterizer:
             out_normals = cumesh.read_vertex_normals()
             
             # Map vertex positions back to original mesh for accurate attribute sampling
-            # Use BVH to find the closest point on original mesh surface for more accurate colors
+            # Rebuild BVH as it was deleted to save VRAM for simplification
+            print("Rebuilding BVH for sampling...")
+            bvh = CuMesh.bvh.cuBVH(bvh_verts_cpu, bvh_faces_cpu)
+            bvh.vertices = bvh_verts_cpu.cuda()
+            bvh.faces = bvh_faces_cpu.cuda()
+            
+            # Now we can safely delete cumesh if it's no longer needed
+            del cumesh
+            torch.cuda.empty_cache()
+            gc.collect()
+
             _, face_id, uvw = bvh.unsigned_distance(out_vertices, return_uvw=True)
             orig_tri_verts = bvh.vertices[bvh.faces[face_id.long()]]  # (N_verts, 3, 3)
             mapped_pos = (orig_tri_verts * uvw.unsqueeze(-1)).sum(dim=1)
             
             # Sample attributes at mapped positions from the voxel grid
-            vertex_attrs = grid_sample_3d(
-                attr_volume,
-                torch.cat([torch.zeros_like(coords[:, :1]), coords], dim=-1),
-                shape=torch.Size([1, attr_volume.shape[1], *grid_size.tolist()]),
-                grid=((mapped_pos - aabb[0]) / voxel_size).reshape(1, -1, 3),
-                mode='trilinear',
-            )
+            # Trilinear sampling from the attribute volume in chunks
+            num_verts = mapped_pos.shape[0]
+            vertex_attrs = torch.zeros((num_verts, attr_volume.shape[1]), device=device)
+            sample_chunk_size = 65536
+            
+            for i in range(0, num_verts, sample_chunk_size):
+                end = min(i + sample_chunk_size, num_verts)
+                vertex_attrs[i:end] = grid_sample_3d(
+                    attr_volume,
+                    torch.cat([torch.zeros_like(coords[:, :1]), coords], dim=-1),
+                    shape=torch.Size([1, attr_volume.shape[1], *grid_size.tolist()]),
+                    grid=((mapped_pos[i:end] - aabb[0]) / voxel_size).reshape(1, -1, 3),
+                    mode='trilinear',
+                )
+            
+            torch.cuda.empty_cache()
             
             # Extract base color and alpha per vertex (vertex_attrs shape: N_vertices x C)
             base_color_idx = attr_layout['base_color']
@@ -1744,7 +1867,34 @@ class Trellis2PostProcessAndUnWrapAndRasterizer:
             placeholder_texture = pil2tensor(Image.new('RGBA', (1, 1), (0, 0, 0, 0)))
             return (textured_mesh, placeholder_texture, placeholder_texture,)
         
-        # --- Standard texture baking path ---
+        # Final cleanup before intensive clustering/unwrapping
+        # (BVH was already deleted at the start)
+        
+        # 1. Topological Sanitization (clear internal knots that consume scratch memory)
+        cumesh.remove_degenerate_faces()
+        cumesh.remove_duplicate_faces()
+        
+        # 2. Complete State Reset: Read -> CPU -> Delete -> Re-init
+        # This clears all internal buffers allocated by simplification/orientation steps
+        temp_v_cuda, temp_f_cuda = cumesh.read()
+        temp_v = temp_v_cuda.cpu()
+        temp_f = temp_f_cuda.cpu()
+        del temp_v_cuda, temp_f_cuda, cumesh
+        
+        torch.cuda.empty_cache()
+        gc.collect()
+        
+        cumesh = CuMesh.CuMesh()
+        cumesh.init(temp_v.cuda(), temp_f.cuda())
+        del temp_v, temp_f
+        
+        torch.cuda.empty_cache()
+        gc.collect()
+        
+        if torch.cuda.is_available():
+            free_mem = torch.cuda.mem_get_info()[0] / 1024**3
+            print(f"Free VRAM before unwrapping (post absolute re-init): {free_mem:.2f} GB")
+
         print('Unwrapping ...')        
         out_vertices, out_faces, out_uvs, out_vmaps = cumesh.uv_unwrap(
             compute_charts_kwargs={
@@ -1752,6 +1902,15 @@ class Trellis2PostProcessAndUnWrapAndRasterizer:
                 "refine_iterations": mesh_cluster_refine_iterations,
                 "global_iterations": mesh_cluster_global_iterations,
                 "smooth_strength": mesh_cluster_smooth_strength,
+            },
+            xatlas_compute_charts_kwargs={
+                "max_iterations": xatlas_max_iterations,
+                "max_cost": xatlas_max_cost,
+                "normal_deviation_weight": 0.0,
+                "roundness_weight": 0.0,
+                "straightness_weight": 0.0,
+                "normal_seam_weight": 0.0,
+                "texture_seam_weight": 0.0,
             },
             return_vmaps=True,
             verbose=True,
@@ -1764,6 +1923,24 @@ class Trellis2PostProcessAndUnWrapAndRasterizer:
         out_vmaps = out_vmaps.cuda()
         cumesh.compute_vertex_normals()
         out_normals = cumesh.read_vertex_normals()[out_vmaps]        
+        
+        # Move attribute volume and spatial parameters back to GPU for sampling
+        attr_volume = attr_volume.cuda()
+        coords = coords.cuda()
+        aabb = aabb.cuda()
+        voxel_size = voxel_size.cuda()
+        
+        # Rebuild BVH for sampling logic
+        print("Rebuilding BVH for sampling...")
+        bvh = CuMesh.bvh.cuBVH(bvh_verts_cpu, bvh_faces_cpu)
+        # Mocking bvh.vertices/faces as the sampling loop expects them
+        bvh.vertices = bvh_verts_cpu.cuda()
+        bvh.faces = bvh_faces_cpu.cuda()
+        
+        # Now we can safely delete cumesh instance
+        del cumesh
+        torch.cuda.empty_cache()
+        gc.collect()
 
         print("Sampling attributes...")
         # Setup differentiable rasterizer context
@@ -1773,39 +1950,65 @@ class Trellis2PostProcessAndUnWrapAndRasterizer:
         rast = torch.zeros((1, texture_size, texture_size, 4), device='cuda', dtype=torch.float32)
         
         # Rasterize in chunks to save memory
-        for i in range(0, out_faces.shape[0], 100000):
+        for i in range(0, out_faces.shape[0], 65536):
             rast_chunk, _ = dr.rasterize(
-                ctx, uvs_rast, out_faces[i:i+100000],
+                ctx, uvs_rast, out_faces[i:i+65536],
                 resolution=[texture_size, texture_size],
             )
             mask_chunk = rast_chunk[..., 3:4] > 0
             rast_chunk[..., 3:4] += i # Store face ID in alpha channel
-            rast = torch.where(mask_chunk, rast_chunk, rast)
+            
+            # In-place update to save one high-resolution tensor allocation
+            mask_exp = mask_chunk.expand(-1, -1, -1, 4)
+            rast[mask_exp] = rast_chunk[mask_exp]
+            del mask_chunk, mask_exp, rast_chunk
         
         # Mask of valid pixels in texture
         mask = rast[0, ..., 3] > 0
         
         # Interpolate 3D positions in UV space (finding 3D coord for every texel)
         pos = dr.interpolate(out_vertices.unsqueeze(0), rast, out_faces)[0][0]
-        valid_pos = pos[mask]
+        valid_pos_raw = pos[mask]
         
-        # Map these positions back to the *original* high-res mesh to get accurate attributes
-        # This corrects geometric errors introduced by simplification/remeshing
-        _, face_id, uvw = bvh.unsigned_distance(valid_pos, return_uvw=True)
-        orig_tri_verts = bvh.vertices[bvh.faces[face_id.long()]] # (N_new, 3, 3)
-        valid_pos = (orig_tri_verts * uvw.unsqueeze(-1)).sum(dim=1)        
+        # Free pos as we only need valid_pos_raw for the loop
+        del pos
+        torch.cuda.empty_cache()
         
         torch.cuda.synchronize()
         
-        # Trilinear sampling from the attribute volume (Color, Material props)
+        # Trilinear sampling from the attribute volume (Color, Material props) in chunks
         attrs = torch.zeros(texture_size, texture_size, attr_volume.shape[1], device='cuda')
-        attrs[mask] = grid_sample_3d(
-            attr_volume,
-            torch.cat([torch.zeros_like(coords[:, :1]), coords], dim=-1),
-            shape=torch.Size([1, attr_volume.shape[1], *grid_size.tolist()]),
-            grid=((valid_pos - aabb[0]) / voxel_size).reshape(1, -1, 3),
-            mode='trilinear',
-        )
+        num_valid = valid_pos_raw.shape[0]
+        sample_chunk_size = 65536
+        
+        # We need a flat view of attrs[mask] to fill it in chunks
+        attrs_flat = attrs.reshape(-1, attr_volume.shape[1])
+        mask_flat = mask.reshape(-1)
+        valid_indices = torch.nonzero(mask_flat).squeeze()
+        
+        for i in range(0, num_valid, sample_chunk_size):
+            end = min(i + sample_chunk_size, num_valid)
+            chunk_pos = valid_pos_raw[i:end]
+            
+            # Map chunked positions back to original mesh inside the loop
+            # This avoids creating a massive (N, 3, 3) orig_tri_verts tensor all at once
+            _, face_id, uvw = bvh.unsigned_distance(chunk_pos, return_uvw=True)
+            orig_tri_verts = bvh.vertices[bvh.faces[face_id.long()]]  # (chunk_size, 3, 3)
+            mapped_chunk_pos = (orig_tri_verts * uvw.unsqueeze(-1)).sum(dim=1)
+            
+            chunk_attrs = grid_sample_3d(
+                attr_volume,
+                torch.cat([torch.zeros_like(coords[:, :1]), coords], dim=-1),
+                shape=torch.Size([1, attr_volume.shape[1], *grid_size.tolist()]),
+                grid=((mapped_chunk_pos - aabb[0]) / voxel_size).reshape(1, -1, 3),
+                mode='trilinear',
+            )
+            attrs_flat[valid_indices[i:end]] = chunk_attrs
+            
+            del chunk_pos, face_id, uvw, orig_tri_verts, mapped_chunk_pos, chunk_attrs
+        
+        del attrs_flat, mask_flat, valid_indices
+        torch.cuda.empty_cache()
         
         # --- Texture Post-Processing & Material Construction ---
         print("Finalizing mesh...")
@@ -1829,7 +2032,7 @@ class Trellis2PostProcessAndUnWrapAndRasterizer:
         interior_black = (mask & (base_color.max(axis=-1) < 5)).astype(np.uint8)
         combined_mask = np.maximum(mask_inv, interior_black)
         
-        print(f"[Trellis2 Bake] Inpainting: {mask_inv.sum()} boundary pixels + "
+        print(f"[Trellis2GGUF Bake] Inpainting: {mask_inv.sum()} boundary pixels + "
               f"{interior_black.sum()} interior black patches "
               f"({interior_black.sum() * 100 / max(mask.sum(), 1):.1f}% of mesh surface)")
         
@@ -1880,7 +2083,6 @@ class Trellis2PostProcessAndUnWrapAndRasterizer:
             
         pbar.update(1)        
         
-        del cumesh
         gc.collect()         
 
         baseColorTexture = pil2tensor(baseColorTexture_np)
@@ -1888,7 +2090,7 @@ class Trellis2PostProcessAndUnWrapAndRasterizer:
         
         return (textured_mesh, baseColorTexture, metallicRoughnessTexture,)    
 
-class Trellis2Remesh:
+class Trellis2GGUFRemesh:
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -1905,7 +2107,7 @@ class Trellis2Remesh:
     RETURN_TYPES = ("MESHWITHVOXEL",)
     RETURN_NAMES = ("mesh",)
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2-GGUF"
     OUTPUT_NODE = True
 
     def process(self, mesh, remesh_band, remesh_project, dual_contouring_resolution, remove_floaters, remove_inner_faces):
@@ -2003,7 +2205,7 @@ class Trellis2Remesh:
                 
         return (mesh_copy,)
         
-class Trellis2ReconstructMesh:
+class Trellis2GGUFReconstructMesh:
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -2017,7 +2219,7 @@ class Trellis2ReconstructMesh:
     RETURN_TYPES = ("MESHWITHVOXEL",)
     RETURN_NAMES = ("mesh",)
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2-GGUF"
     OUTPUT_NODE = True
 
     def process(self, mesh, remesh_band, resolution):
@@ -2039,7 +2241,7 @@ class Trellis2ReconstructMesh:
                 
         return (mesh_copy,)   
 
-class Trellis2ReconstructMeshWithQuad:
+class Trellis2GGUFReconstructMeshWithQuad:
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -2055,7 +2257,7 @@ class Trellis2ReconstructMeshWithQuad:
     RETURN_TYPES = ("MESHWITHVOXEL",)
     RETURN_NAMES = ("mesh",)
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2-GGUF"
     OUTPUT_NODE = True
 
     def process(self, mesh, remesh_band, resolution, remove_floaters, remove_inner_faces):
@@ -2064,7 +2266,7 @@ class Trellis2ReconstructMeshWithQuad:
         reset_cuda()
         
         # 1. Unload ALL models immediately to free VRAM for reconstruction
-        print('[Trellis2] Unloading models to free VRAM for reconstruction...')
+        print('[Trellis2GGUF] Unloading models to free VRAM for reconstruction...')
         mm.unload_all_models()
         mm.soft_empty_cache()
         torch.cuda.empty_cache()
@@ -2083,7 +2285,7 @@ class Trellis2ReconstructMeshWithQuad:
         
         # Build BVH first (it keeps its own internal copy of the mesh)
         from cumesh.remeshing import cuBVH
-        bvh = cuBVH(vertices.detach().clone(), faces.detach().clone())
+        bvh = cuBVH(vertices, faces)
         
         # Free the raw tensors — the BVH is what dual contouring needs.
         # Keeping these large tensors alive during the hashmap/grid_verts
@@ -2093,7 +2295,7 @@ class Trellis2ReconstructMeshWithQuad:
         torch.cuda.empty_cache()
         v_alloc = torch.cuda.memory_allocated() / 1024**2
         v_res = torch.cuda.memory_reserved() / 1024**2
-        print(f'[Trellis2] Reconstruction start — VRAM: alloc={v_alloc:.0f} MB, reserved={v_res:.0f} MB')
+        print(f'[Trellis2GGUF] Reconstruction start — VRAM: alloc={v_alloc:.0f} MB, reserved={v_res:.0f} MB')
 
         # Perform Dual Contouring remeshing (rebuilds topology)
         print(f'Reconstructing mesh at resolution {resolution}...')
@@ -2122,12 +2324,12 @@ class Trellis2ReconstructMeshWithQuad:
                 
         return (new_mesh,)         
         
-class Trellis2MeshTexturing:
+class Trellis2GGUFMeshTexturing:
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
-                "pipeline": ("TRELLIS2PIPELINE",),
+                "pipeline": ("TRELLIS2GGUFPIPELINE",),
                 "image": ("IMAGE",),
                 "trimesh": ("TRIMESH",),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0x7fffffff}),
@@ -2153,16 +2355,18 @@ class Trellis2MeshTexturing:
                 "use_tiled_decoder_for_texture": ("BOOLEAN", {"default": False}),
                 "decoder_tile_size": ("INT", {"default": 120, "min": 32, "max": 1024}),
                 "decoder_overlap": ("INT", {"default": 48, "min": 0, "max": 256}),
+                "xatlas_max_iterations": ("INT",{"default":1, "min":1, "max":10}),
+                "xatlas_max_cost": ("FLOAT",{"default":20.0, "min":0.0, "max":1000.0, "step":0.1}),
             }
         }
 
     RETURN_TYPES = ("TRIMESH","IMAGE","IMAGE",)
     RETURN_NAMES = ("trimesh","base_color_texture","metallic_roughness_texture",)
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2-GGUF"
     OUTPUT_NODE = True
 
-    def process(self, pipeline, image, trimesh, seed, texture_steps, texture_guidance_strength, texture_guidance_rescale, texture_rescale_t, resolution, texture_size, texture_alpha_mode, double_side_material, texture_guidance_interval_start, texture_guidance_interval_end, max_views,bake_on_vertices,use_custom_normals,mesh_cluster_threshold_cone_half_angle_rad, use_tiled_encoder=False, encoder_tile_size=512, encoder_overlap=24, use_tiled_decoder_for_texture=False, decoder_tile_size=120, decoder_overlap=48):
+    def process(self, pipeline, image, trimesh, seed, texture_steps, texture_guidance_strength, texture_guidance_rescale, texture_rescale_t, resolution, texture_size, texture_alpha_mode, double_side_material, texture_guidance_interval_start, texture_guidance_interval_end, max_views,bake_on_vertices,use_custom_normals,mesh_cluster_threshold_cone_half_angle_rad, use_tiled_encoder=False, encoder_tile_size=512, encoder_overlap=24, use_tiled_decoder_for_texture=False, decoder_tile_size=120, decoder_overlap=48, xatlas_max_iterations=1, xatlas_max_cost=20.0):
         images = tensor_batch_to_pil_list(image, max_views=max_views)
         image_in = images[0] if len(images) == 1 else images
 
@@ -2189,7 +2393,16 @@ class Trellis2MeshTexturing:
             encoder_overlap=encoder_overlap,
             use_tiled_decoder=use_tiled_decoder_for_texture,
             decoder_tile_size=decoder_tile_size,
-            decoder_overlap=decoder_overlap
+            decoder_overlap=decoder_overlap,
+            xatlas_compute_charts_kwargs={
+                "max_iterations": xatlas_max_iterations,
+                "max_cost": xatlas_max_cost,
+                "normal_deviation_weight": 0.0,
+                "roundness_weight": 0.0,
+                "straightness_weight": 0.0,
+                "normal_seam_weight": 0.0,
+                "texture_seam_weight": 0.0,
+            }
         )            
 
         baseColorTexture = pil2tensor(baseColorTexture_np)
@@ -2197,12 +2410,12 @@ class Trellis2MeshTexturing:
         
         return (textured_mesh, baseColorTexture, metallicRoughnessTexture, )
         
-class Trellis2MeshTexturingMultiView:
+class Trellis2GGUFMeshTexturingMultiView:
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
-                "pipeline": ("TRELLIS2PIPELINE",),
+                "pipeline": ("TRELLIS2GGUFPIPELINE",),
                 "front_image": ("IMAGE",),
                 "trimesh": ("TRIMESH",),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0x7fffffff}),
@@ -2220,7 +2433,9 @@ class Trellis2MeshTexturingMultiView:
                 "use_custom_normals": ("BOOLEAN",{"default":False}),
                 "mesh_cluster_threshold_cone_half_angle_rad": ("FLOAT",{"default":60.0,"min":0.0,"max":359.9}),
                 "front_axis": (["z", "x"], {"default": "z"}),
-                "blend_temperature": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 10.0, "step": 0.1}),                
+                "blend_temperature": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 10.0, "step": 0.1}),
+                "xatlas_max_iterations": ("INT",{"default":1, "min":1, "max":10}),
+                "xatlas_max_cost": ("FLOAT",{"default":20.0, "min":0.0, "max":1000.0, "step":0.1}),
             },
             "optional": {
                 "back_image": ("IMAGE",),
@@ -2238,7 +2453,7 @@ class Trellis2MeshTexturingMultiView:
     RETURN_TYPES = ("TRIMESH","IMAGE","IMAGE",)
     RETURN_NAMES = ("trimesh","base_color_texture","metallic_roughness_texture",)
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2-GGUF"
     OUTPUT_NODE = True
 
     def process(self, 
@@ -2261,6 +2476,8 @@ class Trellis2MeshTexturingMultiView:
         mesh_cluster_threshold_cone_half_angle_rad,
         front_axis,
         blend_temperature,
+        xatlas_max_iterations,
+        xatlas_max_cost,
         back_image = None,
         left_image = None,
         right_image = None,
@@ -2306,7 +2523,16 @@ class Trellis2MeshTexturingMultiView:
             encoder_overlap=encoder_overlap,
             use_tiled_decoder=use_tiled_decoder_for_texture,
             decoder_tile_size=decoder_tile_size,
-            decoder_overlap=decoder_overlap
+            decoder_overlap=decoder_overlap,
+            xatlas_compute_charts_kwargs={
+                "max_iterations": xatlas_max_iterations,
+                "max_cost": xatlas_max_cost,
+                "normal_deviation_weight": 0.0,
+                "roundness_weight": 0.0,
+                "straightness_weight": 0.0,
+                "normal_seam_weight": 0.0,
+                "texture_seam_weight": 0.0,
+            }
         )            
 
         baseColorTexture = pil2tensor(baseColorTexture_np)
@@ -2314,7 +2540,7 @@ class Trellis2MeshTexturingMultiView:
         
         return (textured_mesh, baseColorTexture, metallicRoughnessTexture, )        
         
-class Trellis2LoadMesh:
+class Trellis2GGUFLoadMesh:
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -2327,7 +2553,7 @@ class Trellis2LoadMesh:
     OUTPUT_TOOLTIPS = ("The glb model with mesh to texturize.",)
     
     FUNCTION = "load"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2-GGUF"
     DESCRIPTION = "Loads a glb model from the given path."
 
     def load(self, glb_path):
@@ -2338,7 +2564,7 @@ class Trellis2LoadMesh:
         
         return (trimesh,)  
         
-class Trellis2PreProcessImage:
+class Trellis2GGUFPreProcessImage:
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -2352,7 +2578,7 @@ class Trellis2PreProcessImage:
     RETURN_NAMES = ("image",)
     
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2-GGUF"
 
     def process(self, image, padding, remove_background):
         image = tensor2pil(image)
@@ -2425,12 +2651,12 @@ class Trellis2PreProcessImage:
         output = Image.fromarray((output * 255).astype(np.uint8))
         return output    
 
-class Trellis2MeshRefiner:
+class Trellis2GGUFMeshRefiner:
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
-                "pipeline": ("TRELLIS2PIPELINE",),
+                "pipeline": ("TRELLIS2GGUFPIPELINE",),
                 "trimesh": ("TRIMESH",),
                 "image": ("IMAGE",),
                 "seed": ("INT", {"default": 12345, "min": 0, "max": 0x7fffffff}),
@@ -2467,7 +2693,7 @@ class Trellis2MeshRefiner:
     RETURN_TYPES = ("MESHWITHVOXEL", "BVH", )
     RETURN_NAMES = ("mesh", "bvh", )
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2-GGUF"
     OUTPUT_NODE = True
 
     def process(self, pipeline, trimesh, image, seed, resolution,
@@ -2515,7 +2741,7 @@ class Trellis2MeshRefiner:
         # Build BVH for the current mesh to guide remeshing
         if generate_texture_slat:
             print("Building BVH for current mesh...")
-            bvh = CuMesh.cuBVH(vertices.detach().clone(), faces.detach().clone())           
+            bvh = CuMesh.cuBVH(vertices, faces)           
             bvh.vertices = vertices.detach().clone()
             bvh.faces = faces.detach().clone()
         else:
@@ -2524,7 +2750,7 @@ class Trellis2MeshRefiner:
         
         return (mesh, bvh,)        
 
-class Trellis2PostProcess2:
+class Trellis2GGUFPostProcess2:
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -2542,7 +2768,7 @@ class Trellis2PostProcess2:
     RETURN_TYPES = ("MESHWITHVOXEL",)
     RETURN_NAMES = ("mesh",)
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2-GGUF"
     OUTPUT_NODE = True
 
     def process(self, mesh, fill_holes, fix_normals, fix_face_orientation, remove_duplicate_faces, weld_vertices, weld_vertices_digits,):
@@ -2598,7 +2824,7 @@ class Trellis2PostProcess2:
                 
         return (mesh_copy,)    
 
-class Trellis2OvoxelExportToGLB:
+class Trellis2GGUFOvoxelExportToGLB:
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -2613,7 +2839,7 @@ class Trellis2OvoxelExportToGLB:
     RETURN_TYPES = ("TRIMESH",)
     RETURN_NAMES = ("trimesh",)
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2-GGUF"
     OUTPUT_NODE = True
 
     def process(self, mesh, resolution, texture_size, target_face_num):
@@ -2637,7 +2863,7 @@ class Trellis2OvoxelExportToGLB:
                 
         return (glb,)
 
-class Trellis2TrimeshToMeshWithVoxel:
+class Trellis2GGUFTrimeshToMeshWithVoxel:
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -2650,7 +2876,7 @@ class Trellis2TrimeshToMeshWithVoxel:
     RETURN_TYPES = ("MESHWITHVOXEL", )
     RETURN_NAMES = ("mesh", )
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2-GGUF"
     OUTPUT_NODE = True
 
     def process(self, trimesh, resolution):       
@@ -2701,7 +2927,7 @@ class Trellis2TrimeshToMeshWithVoxel:
                     
         return mvoxel
         
-class Trellis2Continue:
+class Trellis2GGUFContinue:
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -2714,13 +2940,13 @@ class Trellis2Continue:
     RETURN_TYPES = (any, any, )
     RETURN_NAMES = ("output_1", "output_2", )
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2-GGUF"
     OUTPUT_NODE = True
 
     def process(self, input_1, input_2):        
         return (input_1, input_2,)
         
-class Trellis2MeshWithVoxelToMeshlibMesh:
+class Trellis2GGUFMeshWithVoxelToMeshlibMesh:
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -2732,14 +2958,14 @@ class Trellis2MeshWithVoxelToMeshlibMesh:
     RETURN_TYPES = ("MESHLIB_MESH", )
     RETURN_NAMES = ("meshlib_mesh",)
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2-GGUF"
     OUTPUT_NODE = True
 
     def process(self, mesh):        
         meshlib_mesh = mrmeshnumpy.meshFromFacesVerts(mesh.faces.cpu().numpy(), mesh.vertices.cpu().numpy())                                 
         return (meshlib_mesh,)
 
-class Trellis2FillHolesWithMeshlib:
+class Trellis2GGUFFillHolesWithMeshlib:
     """Fill all holes in a mesh"""
     
     @classmethod
@@ -2753,7 +2979,7 @@ class Trellis2FillHolesWithMeshlib:
     RETURN_TYPES = ("MESHWITHVOXEL", "INT")
     RETURN_NAMES = ("mesh", "holes_filled")
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2-GGUF"
     DESCRIPTION = "Fill all holes in a mesh using optimal triangulation."
 
     def process(self, mesh):
@@ -2813,7 +3039,7 @@ class Trellis2FillHolesWithMeshlib:
         
         return (mesh_copy, holes_filled) 
         
-class Trellis2SmoothNormals:    
+class Trellis2GGUFSmoothNormals:    
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -2825,7 +3051,7 @@ class Trellis2SmoothNormals:
     RETURN_TYPES = ("TRIMESH",)
     RETURN_NAMES = ("trimesh",)
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2-GGUF"
 
     def process(self, trimesh):
         new_mesh = trimesh.copy()
@@ -2833,7 +3059,7 @@ class Trellis2SmoothNormals:
         
         return (new_mesh,)         
 
-class Trellis2RemeshWithQuad:
+class Trellis2GGUFRemeshWithQuad:
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -2850,7 +3076,7 @@ class Trellis2RemeshWithQuad:
     RETURN_TYPES = ("MESHWITHVOXEL",)
     RETURN_NAMES = ("mesh",)
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2-GGUF"
     OUTPUT_NODE = True
 
     def process(self, mesh, remesh_band, remesh_project, dual_contouring_resolution, remove_floaters, remove_inner_faces):
@@ -2948,7 +3174,7 @@ class Trellis2RemeshWithQuad:
                 
         return (mesh_copy,)   
 
-class Trellis2BatchSimplifyMeshAndExport:
+class Trellis2GGUFBatchSimplifyMeshAndExport:
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -2968,7 +3194,7 @@ class Trellis2BatchSimplifyMeshAndExport:
     RETURN_TYPES = ("STRING", )
     RETURN_NAMES = ("lst_glb_path", )
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2-GGUF"
     OUTPUT_NODE = True
 
     def process(self, mesh, target_face_num, method, fill_holes, reorient_vertices, filename_prefix, file_format, weld_vertices, weld_vertices_digits):
@@ -3078,7 +3304,7 @@ class Trellis2BatchSimplifyMeshAndExport:
         
         return (lst_output_mesh,)   
 
-class Trellis2WeldVertices:    
+class Trellis2GGUFWeldVertices:    
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -3093,7 +3319,7 @@ class Trellis2WeldVertices:
     RETURN_TYPES = ("TRIMESH",)
     RETURN_NAMES = ("trimesh",)
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2-GGUF"
 
     def process(self, trimesh, merge_texture, merge_normals, digits):
         new_mesh = trimesh.copy()
@@ -3110,7 +3336,7 @@ class Trellis2WeldVertices:
         
         return (new_mesh,)   
 
-class Trellis2StringSelector:    
+class Trellis2GGUFStringSelector:    
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -3123,7 +3349,7 @@ class Trellis2StringSelector:
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("string",)
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2-GGUF"
 
     def process(self, strings, index):
         if isinstance(strings, list):
@@ -3140,7 +3366,7 @@ class Trellis2StringSelector:
         
         return (string,)
 
-class Trellis2FillHolesWithCuMesh:
+class Trellis2GGUFFillHolesWithCuMesh:
     """Fill all holes in a mesh"""
     
     @classmethod
@@ -3155,7 +3381,7 @@ class Trellis2FillHolesWithCuMesh:
     RETURN_TYPES = ("MESHWITHVOXEL",)
     RETURN_NAMES = ("mesh",)
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2-GGUF"
 
     def process(self, mesh, max_permieters):
         mesh_copy = copy.deepcopy(mesh)
@@ -3164,74 +3390,74 @@ class Trellis2FillHolesWithCuMesh:
         return (mesh_copy,)         
         
 NODE_CLASS_MAPPINGS = {
-    "Trellis2LoadModel": Trellis2LoadModel,
-    "Trellis2MeshWithVoxelGenerator": Trellis2MeshWithVoxelGenerator,
-    "Trellis2LoadImageWithTransparency": Trellis2LoadImageWithTransparency,
-    "Trellis2SimplifyMesh": Trellis2SimplifyMesh,
-    "Trellis2MeshWithVoxelToTrimesh": Trellis2MeshWithVoxelToTrimesh,
-    "Trellis2ExportMesh": Trellis2ExportMesh,
-    "Trellis2PostProcessMesh": Trellis2PostProcessMesh,
-    "Trellis2UnWrapAndRasterizer": Trellis2UnWrapAndRasterizer,
-    "Trellis2MeshWithVoxelAdvancedGenerator": Trellis2MeshWithVoxelAdvancedGenerator,
-    "Trellis2PostProcessAndUnWrapAndRasterizer": Trellis2PostProcessAndUnWrapAndRasterizer,
-    "Trellis2Remesh": Trellis2Remesh,
-    "Trellis2MeshTexturing": Trellis2MeshTexturing,
-    "Trellis2LoadMesh": Trellis2LoadMesh,
-    "Trellis2PreProcessImage": Trellis2PreProcessImage,
-    "Trellis2MeshRefiner": Trellis2MeshRefiner,
-    "Trellis2PostProcess2": Trellis2PostProcess2,
-    "Trellis2OvoxelExportToGLB": Trellis2OvoxelExportToGLB,
-    "Trellis2TrimeshToMeshWithVoxel": Trellis2TrimeshToMeshWithVoxel,
-    "Trellis2SimplifyTrimesh": Trellis2SimplifyTrimesh,
-    "Trellis2Continue": Trellis2Continue,
-    "Trellis2ProgressiveSimplify": Trellis2ProgressiveSimplify,
-    "Trellis2ReconstructMesh": Trellis2ReconstructMesh,
-    "Trellis2MeshWithVoxelToMeshlibMesh": Trellis2MeshWithVoxelToMeshlibMesh,
-    "Trellis2FillHolesWithMeshlib": Trellis2FillHolesWithMeshlib,
-    "Trellis2SmoothNormals": Trellis2SmoothNormals,
-    "Trellis2RemeshWithQuad": Trellis2RemeshWithQuad,
-    "Trellis2BatchSimplifyMeshAndExport": Trellis2BatchSimplifyMeshAndExport,
-    "Trellis2MeshWithVoxelMultiViewGenerator": Trellis2MeshWithVoxelMultiViewGenerator,
-    "Trellis2MeshTexturingMultiView": Trellis2MeshTexturingMultiView,
-    "Trellis2WeldVertices": Trellis2WeldVertices,
-    "Trellis2ReconstructMeshWithQuad": Trellis2ReconstructMeshWithQuad,
-    "Trellis2StringSelector": Trellis2StringSelector,
-    "Trellis2FillHolesWithCuMesh": Trellis2FillHolesWithCuMesh,
+    "Trellis2GGUFLoadModel": Trellis2GGUFLoadModel,
+    "Trellis2GGUFMeshWithVoxelGenerator": Trellis2GGUFMeshWithVoxelGenerator,
+    "Trellis2GGUFLoadImageWithTransparency": Trellis2GGUFLoadImageWithTransparency,
+    "Trellis2GGUFSimplifyMesh": Trellis2GGUFSimplifyMesh,
+    "Trellis2GGUFMeshWithVoxelToTrimesh": Trellis2GGUFMeshWithVoxelToTrimesh,
+    "Trellis2GGUFExportMesh": Trellis2GGUFExportMesh,
+    "Trellis2GGUFPostProcessMesh": Trellis2GGUFPostProcessMesh,
+    "Trellis2GGUFUnWrapAndRasterizer": Trellis2GGUFUnWrapAndRasterizer,
+    "Trellis2GGUFMeshWithVoxelAdvancedGenerator": Trellis2GGUFMeshWithVoxelAdvancedGenerator,
+    "Trellis2GGUFPostProcessAndUnWrapAndRasterizer": Trellis2GGUFPostProcessAndUnWrapAndRasterizer,
+    "Trellis2GGUFRemesh": Trellis2GGUFRemesh,
+    "Trellis2GGUFMeshTexturing": Trellis2GGUFMeshTexturing,
+    "Trellis2GGUFLoadMesh": Trellis2GGUFLoadMesh,
+    "Trellis2GGUFPreProcessImage": Trellis2GGUFPreProcessImage,
+    "Trellis2GGUFMeshRefiner": Trellis2GGUFMeshRefiner,
+    "Trellis2GGUFPostProcess2": Trellis2GGUFPostProcess2,
+    "Trellis2GGUFOvoxelExportToGLB": Trellis2GGUFOvoxelExportToGLB,
+    "Trellis2GGUFTrimeshToMeshWithVoxel": Trellis2GGUFTrimeshToMeshWithVoxel,
+    "Trellis2GGUFSimplifyTrimesh": Trellis2GGUFSimplifyTrimesh,
+    "Trellis2GGUFContinue": Trellis2GGUFContinue,
+    "Trellis2GGUFProgressiveSimplify": Trellis2GGUFProgressiveSimplify,
+    "Trellis2GGUFReconstructMesh": Trellis2GGUFReconstructMesh,
+    "Trellis2GGUFMeshWithVoxelToMeshlibMesh": Trellis2GGUFMeshWithVoxelToMeshlibMesh,
+    "Trellis2GGUFFillHolesWithMeshlib": Trellis2GGUFFillHolesWithMeshlib,
+    "Trellis2GGUFSmoothNormals": Trellis2GGUFSmoothNormals,
+    "Trellis2GGUFRemeshWithQuad": Trellis2GGUFRemeshWithQuad,
+    "Trellis2GGUFBatchSimplifyMeshAndExport": Trellis2GGUFBatchSimplifyMeshAndExport,
+    "Trellis2GGUFMeshWithVoxelMultiViewGenerator": Trellis2GGUFMeshWithVoxelMultiViewGenerator,
+    "Trellis2GGUFMeshTexturingMultiView": Trellis2GGUFMeshTexturingMultiView,
+    "Trellis2GGUFWeldVertices": Trellis2GGUFWeldVertices,
+    "Trellis2GGUFReconstructMeshWithQuad": Trellis2GGUFReconstructMeshWithQuad,
+    "Trellis2GGUFStringSelector": Trellis2GGUFStringSelector,
+    "Trellis2GGUFFillHolesWithCuMesh": Trellis2GGUFFillHolesWithCuMesh,
     }
     
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "Trellis2LoadModel": "Trellis2 - LoadModel",
-    "Trellis2MeshWithVoxelGenerator": "Trellis2 - Mesh With Voxel Generator",
-    "Trellis2LoadImageWithTransparency": "Trellis2 - Load Image with Transparency",
-    "Trellis2SimplifyMesh": "Trellis2 - Simplify Mesh",
-    "Trellis2MeshWithVoxelToTrimesh": "Trellis2 - Mesh With Voxel To Trimesh",
-    "Trellis2ExportMesh": "Trellis2 - Export Mesh",
-    "Trellis2PostProcessMesh": "Trellis2 - PostProcess Mesh (using Cumesh)",
-    "Trellis2UnWrapAndRasterizer": "Trellis2 - UV Unwrap and Rasterize",
-    "Trellis2MeshWithVoxelAdvancedGenerator": "Trellis2 - Mesh With Voxel Advanced Generator",
-    "Trellis2PostProcessAndUnWrapAndRasterizer": "Trellis2 - Post Process/UnWrap and Rasterize",
-    "Trellis2Remesh": "Trellis2 - Remesh",
-    "Trellis2MeshTexturing": "Trellis2 - Mesh Texturing",
-    "Trellis2LoadMesh": "Trellis2 - Load Mesh",
-    "Trellis2PreProcessImage": "Trellis2 - PreProcess Image",
-    "Trellis2MeshRefiner": "Trellis2 - Mesh Refiner",
-    "Trellis2PostProcess2": "Trellis2 - PostProcess Mesh (using Trimesh)",
-    "Trellis2OvoxelExportToGLB": "Trellis2 - Ovoxel Export to GLB",
-    "Trellis2TrimeshToMeshWithVoxel": "Trellis2 - Trimesh to Mesh with Voxel",
-    "Trellis2SimplifyTrimesh": "Trellis2 - Simplify Trimesh",
-    "Trellis2Continue": "Trellis2 - Continue",
-    "Trellis2ProgressiveSimplify": "Trellis2 - Progressive Simplify",
-    "Trellis2ReconstructMesh": "Trellis2 - Reconstruct Mesh",
-    "Trellis2MeshWithVoxelToMeshlibMesh": "Trellis2 - Mesh with Voxel to Meshlib Mesh",
-    "Trellis2FillHolesWithMeshlib": "Trellis2 - Fill Holes with Meshlib",
-    "Trellis2SmoothNormals": "Trellis2 - Smooth Normals",
-    "Trellis2RemeshWithQuad": "Trellis2 - Remesh With Quad",
-    "Trellis2BatchSimplifyMeshAndExport": "Trellis2 - Batch Simplify Mesh And Export",
-    "Trellis2MeshWithVoxelMultiViewGenerator": "Trellis2 - Mesh With Voxel Multi-View Generator",
-    "Trellis2MeshTexturingMultiView": "Trellis2 - Mesh Texturing Multi-View",
-    "Trellis2WeldVertices": "Trellis2 - Weld Vertices",
-    "Trellis2ReconstructMeshWithQuad": "Trellis2 - Reconstruct Mesh With Quad",
-    "Trellis2StringSelector": "Trellis2 - String Selector",
-    "Trellis2FillHolesWithCuMesh": "Trellis2 - Fill Holes with CuMesh",
+    "Trellis2GGUFLoadModel": "Trellis2GGUF - LoadModel",
+    "Trellis2GGUFMeshWithVoxelGenerator": "Trellis2GGUF - Mesh With Voxel Generator",
+    "Trellis2GGUFLoadImageWithTransparency": "Trellis2GGUF - Load Image with Transparency",
+    "Trellis2GGUFSimplifyMesh": "Trellis2GGUF - Simplify Mesh",
+    "Trellis2GGUFMeshWithVoxelToTrimesh": "Trellis2GGUF - Mesh With Voxel To Trimesh",
+    "Trellis2GGUFExportMesh": "Trellis2GGUF - Export Mesh",
+    "Trellis2GGUFPostProcessMesh": "Trellis2GGUF - PostProcess Mesh (using Cumesh)",
+    "Trellis2GGUFUnWrapAndRasterizer": "Trellis2GGUF - UV Unwrap and Rasterize",
+    "Trellis2GGUFMeshWithVoxelAdvancedGenerator": "Trellis2GGUF - Mesh With Voxel Advanced Generator",
+    "Trellis2GGUFPostProcessAndUnWrapAndRasterizer": "Trellis2GGUF - Post Process/UnWrap and Rasterize",
+    "Trellis2GGUFRemesh": "Trellis2GGUF - Remesh",
+    "Trellis2GGUFMeshTexturing": "Trellis2GGUF - Mesh Texturing",
+    "Trellis2GGUFLoadMesh": "Trellis2GGUF - Load Mesh",
+    "Trellis2GGUFPreProcessImage": "Trellis2GGUF - PreProcess Image",
+    "Trellis2GGUFMeshRefiner": "Trellis2GGUF - Mesh Refiner",
+    "Trellis2GGUFPostProcess2": "Trellis2GGUF - PostProcess Mesh (using Trimesh)",
+    "Trellis2GGUFOvoxelExportToGLB": "Trellis2GGUF - Ovoxel Export to GLB",
+    "Trellis2GGUFTrimeshToMeshWithVoxel": "Trellis2GGUF - Trimesh to Mesh with Voxel",
+    "Trellis2GGUFSimplifyTrimesh": "Trellis2GGUF - Simplify Trimesh",
+    "Trellis2GGUFContinue": "Trellis2GGUF - Continue",
+    "Trellis2GGUFProgressiveSimplify": "Trellis2GGUF - Progressive Simplify",
+    "Trellis2GGUFReconstructMesh": "Trellis2GGUF - Reconstruct Mesh",
+    "Trellis2GGUFMeshWithVoxelToMeshlibMesh": "Trellis2GGUF - Mesh with Voxel to Meshlib Mesh",
+    "Trellis2GGUFFillHolesWithMeshlib": "Trellis2GGUF - Fill Holes with Meshlib",
+    "Trellis2GGUFSmoothNormals": "Trellis2GGUF - Smooth Normals",
+    "Trellis2GGUFRemeshWithQuad": "Trellis2GGUF - Remesh With Quad",
+    "Trellis2GGUFBatchSimplifyMeshAndExport": "Trellis2GGUF - Batch Simplify Mesh And Export",
+    "Trellis2GGUFMeshWithVoxelMultiViewGenerator": "Trellis2GGUF - Mesh With Voxel Multi-View Generator",
+    "Trellis2GGUFMeshTexturingMultiView": "Trellis2GGUF - Mesh Texturing Multi-View",
+    "Trellis2GGUFWeldVertices": "Trellis2GGUF - Weld Vertices",
+    "Trellis2GGUFReconstructMeshWithQuad": "Trellis2GGUF - Reconstruct Mesh With Quad",
+    "Trellis2GGUFStringSelector": "Trellis2GGUF - String Selector",
+    "Trellis2GGUFFillHolesWithCuMesh": "Trellis2GGUF - Fill Holes with CuMesh",
     }
