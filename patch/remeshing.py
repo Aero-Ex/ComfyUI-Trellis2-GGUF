@@ -184,7 +184,11 @@ def reconstruct_mesh_dc(
         return torch.zeros((0,3), device=device), torch.zeros((0,3), device=device, dtype=torch.int32)
 
     hashmap_vox = _init_hashmap(resolution, 2 * Nvox, device)
-    _C.hashmap_insert_3d_idx_as_val_cuda(*hashmap_vox, torch.cat([torch.zeros_like(coords[:, :1]), coords], dim=1), resolution, resolution, resolution)
+    keys = torch.empty((Nvox, 4), dtype=torch.int32, device=device)
+    keys[:, 0] = 0
+    keys[:, 1:] = coords
+    _C.hashmap_insert_3d_idx_as_val_cuda(*hashmap_vox, keys, resolution, resolution, resolution)
+    del keys
     if verbose:
         pbar_dc.update(1)  # Voxel hashmap
     grid_verts = _C.get_sparse_voxel_grid_active_vertices(*hashmap_vox, coords.contiguous(), resolution, resolution, resolution)
@@ -195,7 +199,11 @@ def reconstruct_mesh_dc(
     if verbose:
         pbar_dc.update(1)  # UDF computation
     hashmap_vert = _init_hashmap(resolution + 1, 2 * grid_verts.shape[0], device)
-    _C.hashmap_insert_3d_idx_as_val_cuda(*hashmap_vert, torch.cat([torch.zeros_like(grid_verts[:, :1]), grid_verts], dim=1), resolution+1, resolution+1, resolution+1)
+    keys = torch.empty((grid_verts.shape[0], 4), dtype=torch.int32, device=device)
+    keys[:, 0] = 0
+    keys[:, 1:] = grid_verts
+    _C.hashmap_insert_3d_idx_as_val_cuda(*hashmap_vert, keys, resolution+1, resolution+1, resolution+1)
+    del keys
     if verbose:
         pbar_dc.update(1)  # Vertex hashmap
     dual_verts, intersected = _C.simple_dual_contour(*hashmap_vert, coords, dist_vert - eps, resolution+1, resolution+1, resolution+1)
@@ -810,21 +818,22 @@ def remesh_narrow_band_dc_quad(
     torch.cuda.empty_cache()
 
     hashmap_vox = _init_hashmap(resolution, 2 * Nvox, device)
-    for i in range(0, coords_cpu.shape[0], chunk_size):
-        end = min(i + chunk_size, coords_cpu.shape[0])
-        chunk = coords_cpu[i:end].to(device)
-        keys = torch.cat([torch.zeros_like(chunk[:, :1]), chunk], dim=1)
-        _C.hashmap_insert_3d_idx_as_val_cuda(
-            *hashmap_vox, keys,
-            resolution, resolution, resolution
-        )
-        del keys, chunk
+    coords_gpu = coords_cpu.to(device)
+    keys = torch.empty((Nvox, 4), dtype=torch.int32, device=device)
+    keys[:, 0] = 0
+    keys[:, 1:] = coords_gpu
+    _C.hashmap_insert_3d_idx_as_val_cuda(
+        *hashmap_vox, keys,
+        resolution, resolution, resolution
+    )
+    del keys
     
     # Use CPU coords for the active vertices kernel
     grid_verts = _C.get_sparse_voxel_grid_active_vertices(
-        *hashmap_vox, coords_cpu.to(device),
+        *hashmap_vox, coords_gpu,
         resolution, resolution, resolution
     ).cpu()
+    del coords_gpu
     
     # Offload first hashmap to CPU immediately after building vertices
     hashmap_vox_cpu = [t.cpu() for t in hashmap_vox]
@@ -844,21 +853,27 @@ def remesh_narrow_band_dc_quad(
     torch.cuda.empty_cache()
 
     hashmap_vert = _init_hashmap(resolution + 1, 2 * grid_verts.shape[0], device)
-    for i in range(0, grid_verts.shape[0], chunk_size):
-        end = min(i + chunk_size, grid_verts.shape[0])
-        chunk = grid_verts[i:end].to(device)
-        keys = torch.cat([torch.zeros_like(chunk[:, :1]), chunk], dim=1)
+    
+    # Chunked insertion for grid_verts
+    grid_verts_cpu = grid_verts.cpu()
+    del grid_verts # Free right away
+    torch.cuda.empty_cache()
+    
+    for i in range(0, grid_verts_cpu.shape[0], chunk_size):
+        end = min(i + chunk_size, grid_verts_cpu.shape[0])
+        keys = torch.empty((end - i, 4), dtype=torch.int32, device=device)
+        keys[:, 0] = 0
+        keys[:, 1:] = grid_verts_cpu[i:end].to(device)
         _C.hashmap_insert_3d_idx_as_val_cuda(
             *hashmap_vert, keys,
             resolution + 1, resolution + 1, resolution + 1
         )
-        del keys, chunk
+        del keys
     
-    del grid_verts # Free grid_verts
+    del grid_verts_cpu
+    torch.cuda.empty_cache()
     
-    # BVH Offloading for 20M+ faces
-    # The BVH takes massive VRAM (~1.3GB for 20M faces). 
-    # We delete it before the Dual Contouring kernel and rebuild it later if needed.
+    # it before the Dual Contouring kernel and rebuild it later if needed.
     del bvh
     bvh = None
     torch.cuda.empty_cache()
@@ -1137,7 +1152,6 @@ def reconstruct_mesh_dc_quad(
 
         base_res *= 2
         
-        # Chunked voxel expansion to avoid OOM on large grids
         expand_chunk_size = 250_000  # Process 250K coords at a time
         if coords.shape[0] <= expand_chunk_size:
             coords = (coords.unsqueeze(1) * 2 + OFFSETS.unsqueeze(0)).reshape(-1, 3)
@@ -1169,27 +1183,39 @@ def reconstruct_mesh_dc_quad(
     print('Dual Contouring ...')
     Nvox = coords.shape[0]
 
-    # Chunked hashmap insertion to avoid massive concat spike
+    # Unchunked hashmap insertion, but preallocating keys to avoid memory spike
+    coords_cpu = coords.cpu()
+    del coords
+    torch.cuda.empty_cache()
+
     hashmap_vox = _init_hashmap(resolution, 2 * Nvox, device)
-    for i in range(0, coords.shape[0], chunk_size):
-        end = min(i + chunk_size, coords.shape[0])
-        chunk = coords[i:end]
-        keys = torch.cat([torch.zeros_like(chunk[:, :1]), chunk], dim=1)
+    
+    # Process insertion in chunks
+    for i in range(0, Nvox, chunk_size):
+        end = min(i + chunk_size, Nvox)
+        keys_chunk = torch.empty((end - i, 4), dtype=torch.int32, device=device)
+        keys_chunk[:, 0] = 0
+        keys_chunk[:, 1:] = coords_cpu[i:end].to(device)
         _C.hashmap_insert_3d_idx_as_val_cuda(
-            *hashmap_vox, keys,
+            *hashmap_vox, keys_chunk,
             resolution, resolution, resolution
         )
-        del keys
+        del keys_chunk
 
+    coords_gpu = coords_cpu.to(device)
     grid_verts = _C.get_sparse_voxel_grid_active_vertices(
-        *hashmap_vox, coords.contiguous(),
+        *hashmap_vox, coords_gpu.contiguous(),
         resolution, resolution, resolution
     )
+    del coords_gpu
+    torch.cuda.empty_cache()
 
     # Chunked coordinate conversion to avoid massive float32 spike
-    pts_vert = torch.empty((grid_verts.shape[0], 3), dtype=torch.float32, device=device)
-    for i in range(0, grid_verts.shape[0], chunk_size):
-        end = min(i + chunk_size, grid_verts.shape[0])
+    # First get chunk lengths
+    num_gv = grid_verts.shape[0]
+    pts_vert = torch.empty((num_gv, 3), dtype=torch.float32, device=device)
+    for i in range(0, num_gv, chunk_size):
+        end = min(i + chunk_size, num_gv)
         pts_vert[i:end] = (grid_verts[i:end].float() / resolution - 0.5) * scale + center
     
     dist_vert = chunked_udf(bvh, pts_vert)
@@ -1199,11 +1225,14 @@ def reconstruct_mesh_dc_quad(
     # Release reserved pool before the large grid_verts hashmap allocation
     torch.cuda.empty_cache()
     hashmap_vert = _init_hashmap(resolution + 1, 2 * grid_verts.shape[0], device)
+    keys = torch.empty((grid_verts.shape[0], 4), dtype=torch.int32, device=device)
+    keys[:, 0] = 0
+    keys[:, 1:] = grid_verts
     _C.hashmap_insert_3d_idx_as_val_cuda(
-        *hashmap_vert,
-        torch.cat([torch.zeros_like(grid_verts[:, :1]), grid_verts], dim=1),
+        *hashmap_vert, keys,
         resolution + 1, resolution + 1, resolution + 1
     )
+    del keys
 
     dual_verts, intersected = _C.simple_dual_contour(
         *hashmap_vert,
