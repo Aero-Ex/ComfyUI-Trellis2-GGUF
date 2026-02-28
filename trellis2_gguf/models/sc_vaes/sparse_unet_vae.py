@@ -624,7 +624,7 @@ class SparseUnetVaeEncoder(nn.Module):
             
             # Ensure coordinates match; they should be identical due to identical hash generation.
             if cache_h.coords.shape[0] != unique_coords.shape[0]:
-                print(f"[Trellis2GGUF] Warning: Global cache coords count {cache_h.coords.shape[0]} doesn't match tiled coords count {unique_coords.shape[0]}")
+                print(f"[Trellis2] Warning: Global cache coords count {cache_h.coords.shape[0]} doesn't match tiled coords count {unique_coords.shape[0]}")
             
             # Since cache_h.coords comes from deterministic math, unique_coords should be identical
             # if we use cache_h.coords here, we MUST re-order merged_feats if they are sorted differently.
@@ -806,13 +806,13 @@ class SparseUnetVaeDecoder(nn.Module):
                 
                 if curr_guide is not None and curr_guide.device.type == 'cpu':
                     if self.low_vram and curr_guide.coords.shape[0] > 100000:
-                        print(f"    [Trellis2GGUF] Streaming Guide {i} to GPU ({curr_guide.coords.shape[0]} voxels)")
+                        print(f"    [Trellis2] Streaming Guide {i} to GPU ({curr_guide.coords.shape[0]} voxels)")
                     curr_guide = curr_guide.to(h.device)
 
                 # Safety check: Match guide coordinates to hidden state h
                 # This handles mismatches in refine_mesh where latents may differ.
                 if curr_guide is not None and curr_guide.coords.shape[0] != h.coords.shape[0]:
-                    print(f"    [Trellis2GGUF] Mismatch in Guide {i}: {curr_guide.coords.shape[0]} vs {h.coords.shape[0]}. Filtering...")
+                    print(f"    [Trellis2] Mismatch in Guide {i}: {curr_guide.coords.shape[0]} vs {h.coords.shape[0]}. Filtering...")
                     stride = torch.tensor([1024**3, 1024**2, 1024, 1], device=h.device, dtype=torch.int64)
                     h_keys = (h.coords.long() * stride).sum(dim=1)
                     g_keys = (curr_guide.coords.long() * stride).sum(dim=1)
@@ -825,7 +825,7 @@ class SparseUnetVaeDecoder(nn.Module):
                     match = g_ks[pos_c] == h_keys
                     
                     if not match.all():
-                        print(f"    [Trellis2GGUF] WARNING: {h_keys.numel() - match.sum().item()} voxels in h not found in guide!")
+                        print(f"    [Trellis2] WARNING: {h_keys.numel() - match.sum().item()} voxels in h not found in guide!")
                     
                     # Create filtered guide that perfectly matches h.coords
                     f_feats = torch.zeros((h.coords.shape[0], curr_guide.feats.shape[1]), device=h.device, dtype=curr_guide.feats.dtype)
@@ -968,7 +968,7 @@ class SparseUnetVaeDecoder(nn.Module):
         merged_subs0_feats = None
         merged_subs0_counts = None
         
-        print(f"[Trellis2GGUF Tiled] Starting tiled decode: {coords.shape[0]} latent voxels, "
+        print(f"[Trellis2 Tiled] Starting tiled decode: {coords.shape[0]} latent voxels, "
               f"tile_size={tile_size}, overlap={overlap}, "
               f"tiles={len(x_range)}×{len(y_range)}×{len(z_range)}")
         
@@ -1014,7 +1014,7 @@ class SparseUnetVaeDecoder(nn.Module):
                         )
                         
                         v_alloc = torch.cuda.memory_allocated(target_device) / 1024**2
-                        print(f"[Trellis2GGUF Tiled] Tile {xi},{yi},{zi}: {sub_x.coords.shape[0]} lat voxels. VRAM: {v_alloc:.1f}MB")
+                        print(f"[Trellis2 Tiled] Tile {xi},{yi},{zi}: {sub_x.coords.shape[0]} lat voxels. VRAM: {v_alloc:.1f}MB")
                         
                         sub_guide_subs = []
                         if guide_subs is not None:
@@ -1110,7 +1110,7 @@ class SparseUnetVaeDecoder(nn.Module):
                         torch.cuda.empty_cache()
                         
                         v_after = torch.cuda.memory_allocated(target_device) / 1024**2
-                        print(f"[Trellis2GGUF Tiled] Done Tile {xi},{yi},{zi}. VRAM after cleanup: {v_after:.1f}MB")
+                        print(f"[Trellis2 Tiled] Done Tile {xi},{yi},{zi}. VRAM after cleanup: {v_after:.1f}MB")
                     
                     pbar.update(1)
         
@@ -1126,7 +1126,7 @@ class SparseUnetVaeDecoder(nn.Module):
             all_h_feats = torch.cat(all_h_feats, dim=0)
             
             # Print total raw voxels to visualize blending process
-            print(f"[Trellis2GGUF Tiled] Blending: Collected {all_h_coords.shape[0]} raw voxels from all tiles...")
+            print(f"[Trellis2 Tiled] Blending: Collected {all_h_coords.shape[0]} raw voxels from all tiles...")
             
             # Deduplicate and average on CPU to hide seams
             unique_coords, inverse_indices = torch.unique(all_h_coords, dim=0, return_inverse=True)
@@ -1137,7 +1137,7 @@ class SparseUnetVaeDecoder(nn.Module):
             counts.scatter_add_(0, inverse_indices.unsqueeze(1), torch.ones((all_h_feats.shape[0], 1), device='cpu'))
             
             merged_feats /= counts.clamp(min=1.0)
-            print(f"[Trellis2GGUF Tiled] Merged: {unique_coords.shape[0]} voxels, "
+            print(f"[Trellis2 Tiled] Merged: {unique_coords.shape[0]} voxels, "
                   f"mean count: {counts.mean().item():.2f}")
             
             # Transfer the merged features back to the target device (GPU)
@@ -1147,7 +1147,7 @@ class SparseUnetVaeDecoder(nn.Module):
                 scale=out_scale,
                 spatial_cache=saved_spatial_cache,
             )
-            print(f"[Trellis2GGUF Tiled] Final spatial_shape={list(h_merged.spatial_shape)}")
+            print(f"[Trellis2 Tiled] Final spatial_shape={list(h_merged.spatial_shape)}")
         
         if return_subs:
             merged_subs = []

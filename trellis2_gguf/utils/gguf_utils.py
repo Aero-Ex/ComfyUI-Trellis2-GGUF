@@ -1,5 +1,5 @@
 # Adapted from ComfyUI-GGUF (c) City96 || Apache-2.0
-# Ported from ComfyUI-TRELLIS2 to ComfyUI-Trellis2GGUF with fixes for:
+# Ported from ComfyUI-TRELLIS2 to ComfyUI-Trellis2 with fixes for:
 #   - MultiHeadRMSNorm / SparseMultiHeadRMSNorm use gamma not weight
 #   - convert_to_ggml covers SparseGroupNorm32 and SparseLayerNorm32
 import sys
@@ -57,7 +57,7 @@ def _setup_native_gguf():
         local_dequant = None
 
     # Check for ComfyUI-GGUF in custom_nodes.
-    # This file lives at:  custom_nodes/ComfyUI-Trellis2GGUF/trellis2_gguf/utils/gguf_utils.py
+    # This file lives at:  custom_nodes/ComfyUI-Trellis2/trellis2_gguf/utils/gguf_utils.py
     # Three levels up reaches custom_nodes/.
     custom_nodes_path = os.path.abspath(
         os.path.join(os.path.dirname(__file__), "..", "..", "..")
@@ -91,14 +91,14 @@ def _setup_native_gguf():
         is_quantized = gguf_dequant.is_quantized
         get_orig_shape = gguf_loader.get_orig_shape
         HAS_GGUF_OPS = True
-        print("[Trellis2GGUF] Using native ComfyUI-GGUF support (ops/dequant/loader)", file=sys.stderr)
+        print("[Trellis2] Using native ComfyUI-GGUF support (ops/dequant/loader)", file=sys.stderr)
         return True
     except Exception as e:
         if "comfy" in str(e):
             pass  # Expected in isolated subprocess envs
         else:
             print(
-                f"[Trellis2GGUF] ComfyUI-GGUF import failed: {e}. Using internal GGUF implementation.",
+                f"[Trellis2] ComfyUI-GGUF import failed: {e}. Using internal GGUF implementation.",
                 file=sys.stderr,
             )
         for k in list(sys.modules.keys()):
@@ -429,7 +429,7 @@ def dequantize_tensor(tensor, dtype=None, dequant_dtype=None, device=None, scale
 
     if _native_dequantize_tensor is not None:
         if not _GGUF_STRATEGY_LOGGED:
-            print("[Trellis2GGUF] GGUF: native CUDA dequant (ComfyUI-GGUF ops)", file=sys.stderr)
+            print("[Trellis2] GGUF: native CUDA dequant (ComfyUI-GGUF ops)", file=sys.stderr)
             _GGUF_STRATEGY_LOGGED = True
         result = _native_dequantize_tensor(tensor, dtype=dtype, dequant_dtype=dequant_dtype)
         if device is not None:
@@ -459,7 +459,7 @@ def dequantize_tensor(tensor, dtype=None, dequant_dtype=None, device=None, scale
         result = result.to(dtype)
     elif qtype in dequantize_functions:
         if not _GGUF_STRATEGY_LOGGED:
-            print("[Trellis2GGUF] GGUF: internal fallback dequant", file=sys.stderr)
+            print("[Trellis2] GGUF: internal fallback dequant", file=sys.stderr)
             _GGUF_STRATEGY_LOGGED = True
         dequant_dtype = dtype if dequant_dtype == "target" else dequant_dtype
         result = dequantize(tensor.as_subclass(torch.Tensor), qtype, oshape, dtype=dequant_dtype).to(dtype)
@@ -691,7 +691,7 @@ HAS_GGUF_OPS = True
 # ── Key-remapping for GGUF files exported with Flux wrapper ──────────────────
 
 def remap_gguf_state_dict(sd: Dict[str, Any], metadata: Dict[str, Any]) -> Dict[str, Any]:
-    """Remap GGUF state-dict keys from Flux-wrapper naming to Trellis2GGUF naming."""
+    """Remap GGUF state-dict keys from Flux-wrapper naming to Trellis2 naming."""
     arch = metadata.get("general.architecture", "flux")
     if arch != "flux":
         return sd
@@ -750,7 +750,7 @@ def load_gguf_checkpoint(path):
     - ``state_dict``: maps tensor names → GGMLTensor (quantized bytes + metadata).
     - ``metadata``: GGUF header fields (strings, ints, floats, bools).
     """
-    print(f"[Trellis2GGUF] Loading GGUF checkpoint: {os.path.basename(path)}", file=sys.stderr)
+    print(f"[Trellis2] Loading GGUF checkpoint: {os.path.basename(path)}", file=sys.stderr)
     reader = gguf.GGUFReader(path)
     state_dict = {}
     metadata = {}
@@ -771,10 +771,10 @@ def load_gguf_checkpoint(path):
             continue
 
     if metadata:
-        print(f"[Trellis2GGUF]   {len(metadata)} metadata fields", file=sys.stderr)
+        print(f"[Trellis2]   {len(metadata)} metadata fields", file=sys.stderr)
         for k, v in metadata.items():
             if any(kw in k for kw in ("version", "architecture", "quant")):
-                print(f"[Trellis2GGUF]     {k}: {v}", file=sys.stderr)
+                print(f"[Trellis2]     {k}: {v}", file=sys.stderr)
 
     tensor_counts: Dict[str, int] = {}
     for tensor in reader.tensors:
@@ -903,7 +903,7 @@ def convert_to_ggml(module):
 
     model_class_name = module.__class__.__name__
     if any(x in model_class_name for x in ["VAE", "Encoder", "Decoder", "Dino"]):
-        logging.info(f"[Trellis2GGUF] Skipping GGUF conversion for: {model_class_name}")
+        logging.info(f"[Trellis2] Skipping GGUF conversion for: {model_class_name}")
         return module
 
     for name, child in module.named_children():

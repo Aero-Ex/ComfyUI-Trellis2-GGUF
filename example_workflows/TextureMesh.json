@@ -6,7 +6,7 @@
   "nodes": [
     {
       "id": 1,
-      "type": "Trellis2GGUFLoadImageWithTransparency",
+      "type": "Trellis2LoadImageWithTransparency",
       "pos": [
         628.7628375593317,
         1459.9883699049824
@@ -39,9 +39,9 @@
         }
       ],
       "properties": {
-        "aux_id": "visualbruno/ComfyUI-Trellis2GGUF",
+        "aux_id": "visualbruno/ComfyUI-Trellis2",
         "ver": "e7f9b30df7a09bcedf1c955e176754c73f983254",
-        "Node name for S&R": "Trellis2GGUFLoadImageWithTransparency",
+        "Node name for S&R": "Trellis2LoadImageWithTransparency",
         "widget_ue_connectable": {}
       },
       "widgets_values": [
@@ -51,7 +51,7 @@
     },
     {
       "id": 3,
-      "type": "Trellis2GGUFMeshTexturing",
+      "type": "Trellis2MeshTexturing",
       "pos": [
         1571.8033823942308,
         1463.2804651639194
@@ -66,7 +66,7 @@
       "inputs": [
         {
           "name": "pipeline",
-          "type": "TRELLIS2GGUFPIPELINE",
+          "type": "TRELLIS2PIPELINE",
           "link": 1
         },
         {
@@ -104,9 +104,9 @@
         }
       ],
       "properties": {
-        "aux_id": "visualbruno/ComfyUI-Trellis2GGUF",
+        "aux_id": "visualbruno/ComfyUI-Trellis2",
         "ver": "20651320d20ed56a52168c1bd3f29d6886c4be06",
-        "Node name for S&R": "Trellis2GGUFMeshTexturing",
+        "Node name for S&R": "Trellis2MeshTexturing",
         "widget_ue_connectable": {}
       },
       "widgets_values": [
@@ -236,7 +236,7 @@
     },
     {
       "id": 2,
-      "type": "Trellis2GGUFLoadModel",
+      "type": "Trellis2LoadModel",
       "pos": [
         1059.2676133611621,
         1150.7603358557099
@@ -252,16 +252,16 @@
       "outputs": [
         {
           "name": "pipeline",
-          "type": "TRELLIS2GGUFPIPELINE",
+          "type": "TRELLIS2PIPELINE",
           "links": [
             1
           ]
         }
       ],
       "properties": {
-        "aux_id": "visualbruno/ComfyUI-Trellis2GGUF",
+        "aux_id": "visualbruno/ComfyUI-Trellis2",
         "ver": "c5d66aa46bf1bbf903fd4fe9ff086ac774bb7e03",
-        "Node name for S&R": "Trellis2GGUFLoadModel",
+        "Node name for S&R": "Trellis2LoadModel",
         "widget_ue_connectable": {}
       },
       "widgets_values": [
@@ -274,7 +274,7 @@
     },
     {
       "id": 8,
-      "type": "Trellis2GGUFLoadMesh",
+      "type": "Trellis2LoadMesh",
       "pos": [
         954.9310336408487,
         2139.1348802280054
@@ -297,9 +297,9 @@
         }
       ],
       "properties": {
-        "aux_id": "visualbruno/ComfyUI-Trellis2GGUF",
+        "aux_id": "visualbruno/ComfyUI-Trellis2",
         "ver": "20651320d20ed56a52168c1bd3f29d6886c4be06",
-        "Node name for S&R": "Trellis2GGUFLoadMesh",
+        "Node name for S&R": "Trellis2LoadMesh",
         "widget_ue_connectable": {}
       },
       "widgets_values": [
@@ -338,7 +338,7 @@
     },
     {
       "id": 11,
-      "type": "Trellis2GGUFExportMesh",
+      "type": "Trellis2ExportMesh",
       "pos": [
         2025.4304267482246,
         1460.1946946799014
@@ -367,9 +367,9 @@
         }
       ],
       "properties": {
-        "aux_id": "visualbruno/ComfyUI-Trellis2GGUF",
+        "aux_id": "visualbruno/ComfyUI-Trellis2",
         "ver": "20651320d20ed56a52168c1bd3f29d6886c4be06",
-        "Node name for S&R": "Trellis2GGUFExportMesh",
+        "Node name for S&R": "Trellis2ExportMesh",
         "widget_ue_connectable": {}
       },
       "widgets_values": [
@@ -380,7 +380,7 @@
     },
     {
       "id": 13,
-      "type": "Trellis2GGUFPreProcessImage",
+      "type": "Trellis2PreProcessImage",
       "pos": [
         1189.9333547330602,
         1507.6866688560513
@@ -410,9 +410,9 @@
       ],
       "properties": {
         "widget_ue_connectable": {},
-        "aux_id": "visualbruno/ComfyUI-Trellis2GGUF",
+        "aux_id": "visualbruno/ComfyUI-Trellis2",
         "ver": "a354e8c4fead5c152d58b50eae2935cb2923cd72",
-        "Node name for S&R": "Trellis2GGUFPreProcessImage"
+        "Node name for S&R": "Trellis2PreProcessImage"
       },
       "widgets_values": [
         25
@@ -426,7 +426,7 @@
       0,
       3,
       0,
-      "TRELLIS2GGUFPIPELINE"
+      "TRELLIS2PIPELINE"
     ],
     [
       8,

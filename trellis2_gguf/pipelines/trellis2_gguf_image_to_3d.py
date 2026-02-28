@@ -40,7 +40,7 @@ def seed_all(seed: int = 0):
 
 class Trellis2GGUFImageTo3DPipeline(Pipeline):
     """
-    Pipeline for inferring Trellis2GGUF image-to-3D models.
+    Pipeline for inferring Trellis2 image-to-3D models.
 
     Args:
         models (dict[str, nn.Module]): The models to use in the pipeline.
@@ -150,9 +150,9 @@ class Trellis2GGUFImageTo3DPipeline(Pipeline):
         """Move all models in the pipeline to CPU, logging VRAM freed per model."""
         if torch.cuda.is_available():
             vram_start = torch.cuda.memory_allocated() / 1024**2
-            print(f"[Trellis2GGUF] Offloading all models to CPU... (VRAM before: {vram_start:.0f} MB)")
+            print(f"[Trellis2] Offloading all models to CPU... (VRAM before: {vram_start:.0f} MB)")
         else:
-            print("[Trellis2GGUF] Offloading all models to CPU...")
+            print("[Trellis2] Offloading all models to CPU...")
         for name, model in self.models.items():
             if model is not None:
                 before = self._vram_mb()
@@ -160,24 +160,24 @@ class Trellis2GGUFImageTo3DPipeline(Pipeline):
                 after = self._vram_mb()
                 freed = before - after
                 if freed > 1.0:  # only log if something actually moved
-                    print(f"  [Trellis2GGUF] Offloaded '{name}': freed {freed:.0f} MB (now {after:.0f} MB)")
+                    print(f"  [Trellis2] Offloaded '{name}': freed {freed:.0f} MB (now {after:.0f} MB)")
         if self.image_cond_model is not None:
             before = self._vram_mb()
             self.image_cond_model.cpu()
             freed = before - self._vram_mb()
             if freed > 1.0:
-                print(f"  [Trellis2GGUF] Offloaded 'image_cond_model': freed {freed:.0f} MB")
+                print(f"  [Trellis2] Offloaded 'image_cond_model': freed {freed:.0f} MB")
         if self.rembg_model is not None:
             before = self._vram_mb()
             self.rembg_model.cpu()
             freed = before - self._vram_mb()
             if freed > 1.0:
-                print(f"  [Trellis2GGUF] Offloaded 'rembg_model': freed {freed:.0f} MB")
+                print(f"  [Trellis2] Offloaded 'rembg_model': freed {freed:.0f} MB")
         self._cleanup_cuda()
         if torch.cuda.is_available():
             vram_end = torch.cuda.memory_allocated() / 1024**2
             reserved_end = torch.cuda.memory_reserved() / 1024**2
-            print(f"  [Trellis2GGUF] After offload: allocated={vram_end:.0f} MB, reserved={reserved_end:.0f} MB")
+            print(f"  [Trellis2] After offload: allocated={vram_end:.0f} MB, reserved={reserved_end:.0f} MB")
 
     @classmethod
     def from_pretrained(cls, path: str, config_file: str = "pipeline.json", keep_models_loaded = True,
@@ -225,9 +225,9 @@ class Trellis2GGUFImageTo3DPipeline(Pipeline):
         pipeline.gguf_quant = gguf_quant
         pipeline.precision = precision
         
-        pipeline._pretrained_args['models']['sparse_structure_decoder'] = os.path.join(folder_paths.models_dir,"Trellis2GGUF","decoders","Stage1","ss_dec_conv3d_16l8_fp16")
+        pipeline._pretrained_args['models']['sparse_structure_decoder'] = os.path.join(folder_paths.models_dir,"Trellis2","decoders","Stage1","ss_dec_conv3d_16l8_fp16")
         # Check both the new consolidated location and the old legacy location for DINOv3
-        dinov3_new = os.path.join(folder_paths.models_dir,"Trellis2GGUF","dinov3","facebook","dinov3-vitl16-pretrain-lvd1689m")
+        dinov3_new = os.path.join(folder_paths.models_dir,"Trellis2","dinov3","facebook","dinov3-vitl16-pretrain-lvd1689m")
         dinov3_old = os.path.join(folder_paths.models_dir,"Aero-Ex","Dinov3","facebook","dinov3-vitl16-pretrain-lvd1689m")
         facebook_model_path = dinov3_new if os.path.exists(dinov3_new) else dinov3_old
         pipeline._pretrained_args['image_cond_model']['args']['model_name'] = facebook_model_path
@@ -795,37 +795,37 @@ class Trellis2GGUFImageTo3DPipeline(Pipeline):
         # off the GPU before we load the shape decoder. Even with `low_vram` the
         # PyTorch reserved pool from previous sampling may still occupy VRAM.
         if self.low_vram:
-            print(f"[Trellis2GGUF-decode_shape_slat] VRAM before offload: "
+            print(f"[Trellis2-decode_shape_slat] VRAM before offload: "
                   f"alloc={self._vram_mb():.0f} MB, reserved={torch.cuda.memory_reserved()/1024**2:.0f} MB")
             self.move_all_to_cpu()
-            print(f"[Trellis2GGUF-decode_shape_slat] VRAM after offload: "
+            print(f"[Trellis2-decode_shape_slat] VRAM after offload: "
                   f"alloc={self._vram_mb():.0f} MB, reserved={torch.cuda.memory_reserved()/1024**2:.0f} MB")
 
         self.load_shape_slat_decoder()
         
         self.models['shape_slat_decoder'].set_resolution(resolution)
         if self.low_vram:
-            print(f"[Trellis2GGUF-decode_shape_slat] VRAM before loading decoder to GPU: "
+            print(f"[Trellis2-decode_shape_slat] VRAM before loading decoder to GPU: "
                   f"alloc={self._vram_mb():.0f} MB, reserved={torch.cuda.memory_reserved()/1024**2:.0f} MB")
             self.models['shape_slat_decoder'].to(self.device)
             self.models['shape_slat_decoder'].low_vram = True
-            print(f"[Trellis2GGUF-decode_shape_slat] VRAM after loading decoder to GPU: "
+            print(f"[Trellis2-decode_shape_slat] VRAM after loading decoder to GPU: "
                   f"alloc={self._vram_mb():.0f} MB, reserved={torch.cuda.memory_reserved()/1024**2:.0f} MB")
         # Allow overriding via stored pipeline attrs (set by nodes.py before calling)
         shape_tile_size = getattr(self, 'shape_decoder_tile_size', shape_tile_size)
         shape_tile_overlap = getattr(self, 'shape_decoder_tile_overlap', shape_tile_overlap)
         if use_tiled:
-            print(f"[Trellis2GGUF-decode_shape_slat] tile_size={shape_tile_size}, overlap={shape_tile_overlap}, "
+            print(f"[Trellis2-decode_shape_slat] tile_size={shape_tile_size}, overlap={shape_tile_overlap}, "
                   f"latent_voxels={slat.coords.shape[0]}, return_subs={return_subs}")
         ret = self.models['shape_slat_decoder'](slat, return_subs=return_subs, useTiled=use_tiled,
                                                 tile_size=shape_tile_size, tile_overlap=shape_tile_overlap)
         if self.low_vram:
-            print(f"[Trellis2GGUF-decode_shape_slat] VRAM after decoder forward: "
+            print(f"[Trellis2-decode_shape_slat] VRAM after decoder forward: "
                   f"alloc={self._vram_mb():.0f} MB, reserved={torch.cuda.memory_reserved()/1024**2:.0f} MB")
             self.models['shape_slat_decoder'].cpu()
             self.models['shape_slat_decoder'].low_vram = False
             self._cleanup_cuda()
-            print(f"[Trellis2GGUF-decode_shape_slat] VRAM after decoder offload+cleanup: "
+            print(f"[Trellis2-decode_shape_slat] VRAM after decoder offload+cleanup: "
                   f"alloc={self._vram_mb():.0f} MB, reserved={torch.cuda.memory_reserved()/1024**2:.0f} MB")
         
         if not self.keep_models_loaded:        
@@ -950,7 +950,7 @@ class Trellis2GGUFImageTo3DPipeline(Pipeline):
         """
         self._vlog("decode_latent [start]")
         if tex_slat is not None:
-            print(f"[Trellis2GGUF-decode_latent] Coords: shape_slat={shape_slat.coords.shape[0]}, tex_slat={tex_slat.coords.shape[0]}")
+            print(f"[Trellis2-decode_latent] Coords: shape_slat={shape_slat.coords.shape[0]}, tex_slat={tex_slat.coords.shape[0]}")
         meshes, subs = self.decode_shape_slat(shape_slat, resolution, use_tiled=use_tiled, return_subs=(tex_slat is not None))
         if self.low_vram:
             self._cleanup_cuda()                                                         
@@ -1945,7 +1945,7 @@ class Trellis2GGUFImageTo3DPipeline(Pipeline):
             uvs_torch = torch.from_numpy(uvs).float().cuda()
         else:
             if self.low_vram:
-                print("[Trellis2GGUF] Low VRAM: Offloading voxel grid to CPU for mesh unwrapping...")
+                print("[Trellis2] Low VRAM: Offloading voxel grid to CPU for mesh unwrapping...")
                 pbr_voxel = pbr_voxel.cpu()
                 self._cleanup_cuda()
 
@@ -1987,7 +1987,7 @@ class Trellis2GGUFImageTo3DPipeline(Pipeline):
             gc.collect()      
 
             if self.low_vram:
-                print("[Trellis2GGUF] Low VRAM: Moving voxel grid back to GPU...")
+                print("[Trellis2] Low VRAM: Moving voxel grid back to GPU...")
                 pbr_voxel = pbr_voxel.to(self.device)
                 self._cleanup_cuda()
             
@@ -2432,7 +2432,7 @@ class Trellis2GGUFImageTo3DPipeline(Pipeline):
             self.models['shape_slat_decoder'].low_vram = True
         decoder = self.models['shape_slat_decoder']
         if use_tiled_upsample:
-            print(f'[Trellis2GGUF] Tiled upsample (tile={upsample_tile_size}, overlap={upsample_overlap}) ...')
+            print(f'[Trellis2] Tiled upsample (tile={upsample_tile_size}, overlap={upsample_overlap}) ...')
             hr_coords = decoder._tiled_upsample(mesh_slat, upsample_times=4,
                                                 tile_size=upsample_tile_size,
                                                 overlap=upsample_overlap)

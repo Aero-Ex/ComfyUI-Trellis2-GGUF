@@ -6,7 +6,7 @@
   "nodes": [
     {
       "id": 1,
-      "type": "Trellis2GGUFLoadModel",
+      "type": "Trellis2LoadModel",
       "pos": [
         324.6709594238695,
         598.4626830706405
@@ -22,16 +22,16 @@
       "outputs": [
         {
           "name": "pipeline",
-          "type": "TRELLIS2GGUFPIPELINE",
+          "type": "TRELLIS2PIPELINE",
           "links": [
             1
           ]
         }
       ],
       "properties": {
-        "aux_id": "visualbruno/ComfyUI-Trellis2GGUF",
+        "aux_id": "visualbruno/ComfyUI-Trellis2",
         "ver": "c5d66aa46bf1bbf903fd4fe9ff086ac774bb7e03",
-        "Node name for S&R": "Trellis2GGUFLoadModel",
+        "Node name for S&R": "Trellis2LoadModel",
         "widget_ue_connectable": {}
       },
       "widgets_values": [
@@ -44,7 +44,7 @@
     },
     {
       "id": 10,
-      "type": "Trellis2GGUFSimplifyMesh",
+      "type": "Trellis2SimplifyMesh",
       "pos": [
         1674.314276200003,
         751.6717152746028
@@ -73,9 +73,9 @@
         }
       ],
       "properties": {
-        "aux_id": "visualbruno/ComfyUI-Trellis2GGUF",
+        "aux_id": "visualbruno/ComfyUI-Trellis2",
         "ver": "87f48b0726b5d5e58b744bbac632331cd7a34103",
-        "Node name for S&R": "Trellis2GGUFSimplifyMesh",
+        "Node name for S&R": "Trellis2SimplifyMesh",
         "widget_ue_connectable": {}
       },
       "widgets_values": [
@@ -85,7 +85,7 @@
     },
     {
       "id": 9,
-      "type": "Trellis2GGUFMeshWithVoxelToTrimesh",
+      "type": "Trellis2MeshWithVoxelToTrimesh",
       "pos": [
         2339.5056410006705,
         749.748649282976
@@ -114,9 +114,9 @@
         }
       ],
       "properties": {
-        "aux_id": "visualbruno/ComfyUI-Trellis2GGUF",
+        "aux_id": "visualbruno/ComfyUI-Trellis2",
         "ver": "87f48b0726b5d5e58b744bbac632331cd7a34103",
-        "Node name for S&R": "Trellis2GGUFMeshWithVoxelToTrimesh",
+        "Node name for S&R": "Trellis2MeshWithVoxelToTrimesh",
         "widget_ue_connectable": {}
       },
       "widgets_values": [
@@ -206,7 +206,7 @@
     },
     {
       "id": 3,
-      "type": "Trellis2GGUFLoadMesh",
+      "type": "Trellis2LoadMesh",
       "pos": [
         88.2344076276703,
         883.9986034541271
@@ -229,9 +229,9 @@
         }
       ],
       "properties": {
-        "aux_id": "visualbruno/ComfyUI-Trellis2GGUF",
+        "aux_id": "visualbruno/ComfyUI-Trellis2",
         "ver": "87f48b0726b5d5e58b744bbac632331cd7a34103",
-        "Node name for S&R": "Trellis2GGUFLoadMesh",
+        "Node name for S&R": "Trellis2LoadMesh",
         "widget_ue_connectable": {}
       },
       "widgets_values": [
@@ -240,7 +240,7 @@
     },
     {
       "id": 2,
-      "type": "Trellis2GGUFLoadImageWithTransparency",
+      "type": "Trellis2LoadImageWithTransparency",
       "pos": [
         -1.0218170793607726,
         1192.2193858033618
@@ -273,9 +273,9 @@
         }
       ],
       "properties": {
-        "aux_id": "visualbruno/ComfyUI-Trellis2GGUF",
+        "aux_id": "visualbruno/ComfyUI-Trellis2",
         "ver": "e7f9b30df7a09bcedf1c955e176754c73f983254",
-        "Node name for S&R": "Trellis2GGUFLoadImageWithTransparency",
+        "Node name for S&R": "Trellis2LoadImageWithTransparency",
         "widget_ue_connectable": {}
       },
       "widgets_values": [
@@ -285,7 +285,7 @@
     },
     {
       "id": 4,
-      "type": "Trellis2GGUFMeshRefiner",
+      "type": "Trellis2MeshRefiner",
       "pos": [
         791.2868696727592,
         858.6175724018431
@@ -300,7 +300,7 @@
       "inputs": [
         {
           "name": "pipeline",
-          "type": "TRELLIS2GGUFPIPELINE",
+          "type": "TRELLIS2PIPELINE",
           "link": 1
         },
         {
@@ -329,9 +329,9 @@
         }
       ],
       "properties": {
-        "aux_id": "visualbruno/ComfyUI-Trellis2GGUF",
+        "aux_id": "visualbruno/ComfyUI-Trellis2",
         "ver": "87f48b0726b5d5e58b744bbac632331cd7a34103",
-        "Node name for S&R": "Trellis2GGUFMeshRefiner",
+        "Node name for S&R": "Trellis2MeshRefiner",
         "widget_ue_connectable": {}
       },
       "widgets_values": [
@@ -359,7 +359,7 @@
     },
     {
       "id": 6,
-      "type": "Trellis2GGUFExportMesh",
+      "type": "Trellis2ExportMesh",
       "pos": [
         1236.5760403785862,
         1117.3755723277798
@@ -388,9 +388,9 @@
         }
       ],
       "properties": {
-        "aux_id": "visualbruno/ComfyUI-Trellis2GGUF",
+        "aux_id": "visualbruno/ComfyUI-Trellis2",
         "ver": "87f48b0726b5d5e58b744bbac632331cd7a34103",
-        "Node name for S&R": "Trellis2GGUFExportMesh",
+        "Node name for S&R": "Trellis2ExportMesh",
         "widget_ue_connectable": {}
       },
       "widgets_values": [
@@ -401,7 +401,7 @@
     },
     {
       "id": 14,
-      "type": "Trellis2GGUFFillHolesWithMeshlib",
+      "type": "Trellis2FillHolesWithMeshlib",
       "pos": [
         2050.9297608170014,
         763.9776229275544
@@ -435,16 +435,16 @@
         }
       ],
       "properties": {
-        "aux_id": "visualbruno/ComfyUI-Trellis2GGUF",
+        "aux_id": "visualbruno/ComfyUI-Trellis2",
         "ver": "a354e8c4fead5c152d58b50eae2935cb2923cd72",
-        "Node name for S&R": "Trellis2GGUFFillHolesWithMeshlib",
+        "Node name for S&R": "Trellis2FillHolesWithMeshlib",
         "widget_ue_connectable": {}
       },
       "widgets_values": []
     },
     {
       "id": 15,
-      "type": "Trellis2GGUFPreProcessImage",
+      "type": "Trellis2PreProcessImage",
       "pos": [
         300.70156840071724,
         1039.995663322853
@@ -473,9 +473,9 @@
         }
       ],
       "properties": {
-        "aux_id": "visualbruno/ComfyUI-Trellis2GGUF",
+        "aux_id": "visualbruno/ComfyUI-Trellis2",
         "ver": "a354e8c4fead5c152d58b50eae2935cb2923cd72",
-        "Node name for S&R": "Trellis2GGUFPreProcessImage",
+        "Node name for S&R": "Trellis2PreProcessImage",
         "widget_ue_connectable": {}
       },
       "widgets_values": [
@@ -484,7 +484,7 @@
     },
     {
       "id": 16,
-      "type": "Trellis2GGUFRemesh",
+      "type": "Trellis2Remesh",
       "pos": [
         1224.0291703682533,
         749.6436908727221
@@ -513,9 +513,9 @@
         }
       ],
       "properties": {
-        "aux_id": "visualbruno/ComfyUI-Trellis2GGUF",
+        "aux_id": "visualbruno/ComfyUI-Trellis2",
         "ver": "a354e8c4fead5c152d58b50eae2935cb2923cd72",
-        "Node name for S&R": "Trellis2GGUFRemesh",
+        "Node name for S&R": "Trellis2Remesh",
         "widget_ue_connectable": {}
       },
       "widgets_values": [
@@ -536,7 +536,7 @@
       0,
       4,
       0,
-      "TRELLIS2GGUFPIPELINE"
+      "TRELLIS2PIPELINE"
     ],
     [
       2,

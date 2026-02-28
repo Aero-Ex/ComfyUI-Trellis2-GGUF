@@ -165,11 +165,11 @@ def install_flash_attn(pip_base, env, dry_run=False):
         return False
 
 def install():
-    parser = argparse.ArgumentParser(description="ComfyUI-Trellis2GGUF Installation")
+    parser = argparse.ArgumentParser(description="ComfyUI-Trellis2 Installation")
     parser.add_argument("--dry-run", action="store_true", help="Print the steps without installing")
     args = parser.parse_args()
 
-    print("--- ComfyUI-Trellis2GGUF Installation ---")
+    print("--- ComfyUI-Trellis2 Installation ---")
     if args.dry_run:
         print("(DRY RUN MODE)")
     

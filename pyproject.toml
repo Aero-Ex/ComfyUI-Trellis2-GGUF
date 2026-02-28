@@ -1,5 +1,5 @@
 [project]
-name = "trellis2_gguf"
+name = "trellis2-gguf"
 description = "ComfyUI Wrapper for Microsoft Trellis.2 - Native and Compact Structured Latents for 3D Generation"
 version = "0.0.1"
 license = {file = "LICENSE"} 

@@ -17,7 +17,7 @@ import flex_gemm
 
 class Trellis2GGUFTexturingPipeline(Pipeline):
     """
-    Pipeline for inferring Trellis2GGUF image-to-3D models.
+    Pipeline for inferring Trellis2 image-to-3D models.
 
     Args:
         models (dict[str, nn.Module]): The models to use in the pipeline.

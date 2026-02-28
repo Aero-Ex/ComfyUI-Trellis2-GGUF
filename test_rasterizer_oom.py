@@ -34,14 +34,14 @@ if custom_node_path not in sys.path:
 # Mock specific trellis2_gguf components if needed, or allow them to be imported normally
 # since we added custom_node_path to sys.path
 try:
-    from nodes import Trellis2GGUFPostProcessAndUnWrapAndRasterizer
+    from nodes import Trellis2PostProcessAndUnWrapAndRasterizer
     from trellis2_gguf.representations.mesh.base import MeshWithVoxel
 except ImportError as e:
     print(f"Import failed: {e}")
     # Fallback/Emergency mocks for nodes import
     sys.modules["nodes.trellis2_gguf"] = MagicMock()
     sys.modules["nodes.trellis2_gguf.pipelines"] = MagicMock()
-    from nodes import Trellis2GGUFPostProcessAndUnWrapAndRasterizer
+    from nodes import Trellis2PostProcessAndUnWrapAndRasterizer
     from trellis2_gguf.representations.mesh.base import MeshWithVoxel
 import cumesh
 
@@ -102,7 +102,7 @@ def test_rasterizer():
     bvh.faces = faces
 
     # 4. Instantiate Node
-    node = Trellis2GGUFPostProcessAndUnWrapAndRasterizer()
+    node = Trellis2PostProcessAndUnWrapAndRasterizer()
     
     # constructed args
     

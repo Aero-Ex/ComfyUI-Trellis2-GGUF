@@ -342,7 +342,7 @@ class Trellis2GGUFLoadModel:
             },
         }
 
-    RETURN_TYPES = ("TRELLIS2GGUFPIPELINE", )
+    RETURN_TYPES = ("TRELLIS2PIPELINE", )
     RETURN_NAMES = ("pipeline", )
     FUNCTION = "process"
     CATEGORY = "Trellis2-GGUF"
@@ -418,7 +418,7 @@ class Trellis2GGUFMeshWithVoxelGenerator:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "pipeline": ("TRELLIS2GGUFPIPELINE",),
+                "pipeline": ("TRELLIS2PIPELINE",),
                 "image": ("IMAGE",),                
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0x7fffffff}),
                 "pipeline_type": (["512","1024","1024_cascade","1536_cascade"],{"default":"1024_cascade"}),
@@ -768,7 +768,7 @@ class Trellis2GGUFExportMesh:
         return {
             "required": {
                 "trimesh": ("TRIMESH",),
-                "filename_prefix": ("STRING", {"default": "3D/Trellis2GGUF"}),
+                "filename_prefix": ("STRING", {"default": "3D/Trellis2"}),
                 "file_format": (["glb", "obj", "ply", "stl", "3mf", "dae"],),
             }
         }
@@ -1235,7 +1235,7 @@ class Trellis2GGUFMeshWithVoxelAdvancedGenerator:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "pipeline": ("TRELLIS2GGUFPIPELINE",),
+                "pipeline": ("TRELLIS2PIPELINE",),
                 "image": ("IMAGE",),
                 "seed": ("INT", {"default": 12345, "min": 0, "max": 0x7fffffff}),
                 "pipeline_type": (["512","1024","1024_cascade","1536_cascade"],{"default":"1024_cascade"}),
@@ -1353,7 +1353,7 @@ class Trellis2GGUFMeshWithVoxelMultiViewGenerator:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "pipeline": ("TRELLIS2GGUFPIPELINE",),
+                "pipeline": ("TRELLIS2PIPELINE",),
                 "front_image": ("IMAGE",),
                 "seed": ("INT", {"default": 12345, "min": 0, "max": 0x7fffffff}),
                 "pipeline_type": (["512","1024","1024_cascade","1536_cascade"],{"default":"1024_cascade"}),
@@ -2032,7 +2032,7 @@ class Trellis2GGUFPostProcessAndUnWrapAndRasterizer:
         interior_black = (mask & (base_color.max(axis=-1) < 5)).astype(np.uint8)
         combined_mask = np.maximum(mask_inv, interior_black)
         
-        print(f"[Trellis2GGUF Bake] Inpainting: {mask_inv.sum()} boundary pixels + "
+        print(f"[Trellis2 Bake] Inpainting: {mask_inv.sum()} boundary pixels + "
               f"{interior_black.sum()} interior black patches "
               f"({interior_black.sum() * 100 / max(mask.sum(), 1):.1f}% of mesh surface)")
         
@@ -2266,7 +2266,7 @@ class Trellis2GGUFReconstructMeshWithQuad:
         reset_cuda()
         
         # 1. Unload ALL models immediately to free VRAM for reconstruction
-        print('[Trellis2GGUF] Unloading models to free VRAM for reconstruction...')
+        print('[Trellis2] Unloading models to free VRAM for reconstruction...')
         mm.unload_all_models()
         mm.soft_empty_cache()
         torch.cuda.empty_cache()
@@ -2295,7 +2295,7 @@ class Trellis2GGUFReconstructMeshWithQuad:
         torch.cuda.empty_cache()
         v_alloc = torch.cuda.memory_allocated() / 1024**2
         v_res = torch.cuda.memory_reserved() / 1024**2
-        print(f'[Trellis2GGUF] Reconstruction start — VRAM: alloc={v_alloc:.0f} MB, reserved={v_res:.0f} MB')
+        print(f'[Trellis2] Reconstruction start — VRAM: alloc={v_alloc:.0f} MB, reserved={v_res:.0f} MB')
 
         # Perform Dual Contouring remeshing (rebuilds topology)
         print(f'Reconstructing mesh at resolution {resolution}...')
@@ -2329,7 +2329,7 @@ class Trellis2GGUFMeshTexturing:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "pipeline": ("TRELLIS2GGUFPIPELINE",),
+                "pipeline": ("TRELLIS2PIPELINE",),
                 "image": ("IMAGE",),
                 "trimesh": ("TRIMESH",),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0x7fffffff}),
@@ -2415,7 +2415,7 @@ class Trellis2GGUFMeshTexturingMultiView:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "pipeline": ("TRELLIS2GGUFPIPELINE",),
+                "pipeline": ("TRELLIS2PIPELINE",),
                 "front_image": ("IMAGE",),
                 "trimesh": ("TRIMESH",),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0x7fffffff}),
@@ -2656,7 +2656,7 @@ class Trellis2GGUFMeshRefiner:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "pipeline": ("TRELLIS2GGUFPIPELINE",),
+                "pipeline": ("TRELLIS2PIPELINE",),
                 "trimesh": ("TRIMESH",),
                 "image": ("IMAGE",),
                 "seed": ("INT", {"default": 12345, "min": 0, "max": 0x7fffffff}),

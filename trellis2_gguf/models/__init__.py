@@ -143,12 +143,12 @@ def from_pretrained(path: str, enable_gguf: bool = False, gguf_quant: str = "Q8_
     Load a model from a pretrained checkpoint.
 
     This function ONLY performs local file resolution — it NEVER downloads anything.
-    All downloading must be done first via Trellis2GGUFLoadModel which calls
+    All downloading must be done first via Trellis2LoadModel which calls
     model_manager.ensure_model_files().
 
     Args:
         path: Absolute path prefix for the model (without .json / .safetensors / .gguf).
-              e.g.  /path/to/models/Trellis2GGUF/ckpts/ss_flow_img_dit_1_3B_64_bf16
+              e.g.  /path/to/models/Trellis2/ckpts/ss_flow_img_dit_1_3B_64_bf16
         enable_gguf: Load as GGUF instead of Safetensors.
         gguf_quant:  GGUF quantization type (e.g. "Q6_K").
         precision:   Safetensors precision suffix override (e.g. "fp8", "bf16").
@@ -178,7 +178,7 @@ def from_pretrained(path: str, enable_gguf: bool = False, gguf_quant: str = "Q8_
     precision = kwargs.pop("precision", None)
     basename = os.path.basename(path)
 
-    print(f"[Trellis2GGUF-models] from_pretrained: {basename}  enable_gguf={enable_gguf}  quant={gguf_quant}  precision={precision}", file=sys.stderr)
+    print(f"[Trellis2-models] from_pretrained: {basename}  enable_gguf={enable_gguf}  quant={gguf_quant}  precision={precision}", file=sys.stderr)
 
     # ── Resolve local paths via model_manager (NO downloads here) ────────
     config_file, model_file, is_gguf = model_manager.resolve_local_path(
@@ -188,7 +188,7 @@ def from_pretrained(path: str, enable_gguf: bool = False, gguf_quant: str = "Q8_
         precision=precision,
     )
 
-    print(f"[Trellis2GGUF-models] Resolved: {os.path.basename(model_file)}", file=sys.stderr)
+    print(f"[Trellis2-models] Resolved: {os.path.basename(model_file)}", file=sys.stderr)
 
     # ── Load checkpoint ───────────────────────────────────────────────────
     with open(config_file, 'r') as f:
@@ -209,7 +209,7 @@ def from_pretrained(path: str, enable_gguf: bool = False, gguf_quant: str = "Q8_
                 if k in metadata:
                     config['args'][v] = metadata[k]
         config = _infer_arch_from_sd(sd, config)
-        print(f"[Trellis2GGUF-models]   Arch inferred from sd: model_channels={config['args'].get('model_channels')} "
+        print(f"[Trellis2-models]   Arch inferred from sd: model_channels={config['args'].get('model_channels')} "
               f"num_blocks={config['args'].get('num_blocks')} "
               f"mlp_ratio={config['args'].get('mlp_ratio')}", file=sys.stderr)
     else:
@@ -251,7 +251,7 @@ def from_pretrained(path: str, enable_gguf: bool = False, gguf_quant: str = "Q8_
             sd_loaded = load_file(model_file, device=device)
             model.load_state_dict(sd_loaded, strict=False)
         except Exception as e:
-            print(f"[Trellis2GGUF-models] Fast load failed ({e}), using CPU fallback", file=sys.stderr)
+            print(f"[Trellis2-models] Fast load failed ({e}), using CPU fallback", file=sys.stderr)
             model.load_state_dict(load_file(model_file), strict=False)
 
     return model
