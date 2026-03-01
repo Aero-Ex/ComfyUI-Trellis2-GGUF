@@ -36,8 +36,8 @@ import comfy.model_management as mm
 from comfy.utils import load_torch_file, ProgressBar, common_upscale
 import comfy.utils
 
-from .trellis2.pipelines import Trellis2ImageTo3DPipeline
-from .trellis2.representations import Mesh, MeshWithVoxel
+from .trellis2_gguf.pipelines import Trellis2ImageTo3DPipeline
+from .trellis2_gguf.representations import Mesh, MeshWithVoxel
 
 script_directory = os.path.dirname(os.path.abspath(__file__))
 comfy_path = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
@@ -315,13 +315,20 @@ def _batched_unsigned_distance(bvh, positions, batch_size=100000, return_uvw=Fal
         torch.cat(uvw_list) if return_uvw else None
     )    
 
-class Trellis2LoadModel:
+class Trellis2_GGUFLoadModel:
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
                 "modelname": (["TRELLIS.2-4B"],),
-                "model_format": (["Safetensors (FP16)", "GGUF Q8_0", "GGUF Q6_K", "GGUF Q5_K", "GGUF Q4_K"], {"default": "Safetensors (FP16)"}),
+                "model_format": ([
+                    "Safetensors (BF16)", 
+                    "Safetensors (FP8)", 
+                    "GGUF Q8_0", 
+                    "GGUF Q6_K", 
+                    "GGUF Q5_K_M", 
+                    "GGUF Q4_K_M"
+                ], {"default": "Safetensors (BF16)"}),
                 "backend": (["flash_attn","xformers"],{"default":"xformers"}),
                 "device": (["cpu","cuda"],{"default":"cuda"}),
                 "low_vram": ("BOOLEAN",{"default":True}),
@@ -332,7 +339,7 @@ class Trellis2LoadModel:
     RETURN_TYPES = ("TRELLIS2PIPELINE", )
     RETURN_NAMES = ("pipeline", )
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2Wrapper (GGUF)"
     OUTPUT_NODE = True
 
     def process(self, modelname, model_format, backend, device, low_vram, keep_models_loaded):
@@ -393,37 +400,62 @@ class Trellis2LoadModel:
             url = "https://huggingface.co/microsoft/TRELLIS-image-large/resolve/main/ckpts/ss_dec_conv3d_16l8_fp16.safetensors?download=true"
             filename = os.path.join(folder_paths.models_dir,"microsoft","TRELLIS-image-large","ckpts","ss_dec_conv3d_16l8_fp16.safetensors")
 
-            response = requests.get(url)
-            if response.status_code == 200:
-                with open(filename, "wb") as f:
-                    f.write(response.content)
-                print("Download ss_dec_conv3d_16l8_fp16.safetensors complete!")
-            else:
-                raise Exception("Cannot download Trellis-Image-Large file ss_dec_conv3d_16l8_fp16.safetensors")
-        
-       
+        # ── Delegate ALL downloading to model_manager ─────────────────────
+        import importlib.util, sys as _sys
+        _mm_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "model_manager.py")
+        if "trellis2_gguf_model_manager" not in _sys.modules:
+            spec = importlib.util.spec_from_file_location("trellis2_gguf_model_manager", _mm_path)
+            _mm = importlib.util.module_from_spec(spec)
+            _sys.modules["trellis2_gguf_model_manager"] = _mm
+            spec.loader.exec_module(_mm)
+        model_manager = _sys.modules["trellis2_gguf_model_manager"]
+
+        model_path = model_manager.get_models_dir()
+
+        # Ensure pipeline.json exists first; read it, then delegate everything
+        import json
+        pipeline_json_local = os.path.join(model_path, "pipeline.json")
+        if not os.path.exists(pipeline_json_local):
+            from huggingface_hub import hf_hub_download
+            print(f"[Trellis2-GGUF] Downloading pipeline.json from {model_manager.GGUF_REPO}...")
+            hf_hub_download(repo_id=model_manager.GGUF_REPO, filename="pipeline.json", local_dir=model_path)
+
+        with open(pipeline_json_local, 'r') as f:
+            pipeline_config = json.load(f)
+
+        # This is the ONLY place that downloads model files
+        model_manager.ensure_model_files(model_format, pipeline_config)
+
+        # ── Parse format for pipeline construction ────────────────────────
         enable_gguf = model_format.startswith("GGUF")
         gguf_quant = model_format.split(" ")[1] if enable_gguf else "Q8_0"
+        precision = None
+        if "(BF16)" in model_format: precision = "bf16"
+        elif "(FP8)" in model_format: precision = "fp8"
+
         pipeline = Trellis2ImageTo3DPipeline.from_pretrained(
             model_path,
             keep_models_loaded=keep_models_loaded,
             enable_gguf=enable_gguf,
             gguf_quant=gguf_quant,
+            precision=precision,
         )
-      
+
         pipeline.low_vram = low_vram
-        
-        if device=="cuda":
+
+        if device == "cuda":
             if low_vram:
                 pipeline.cuda()
             else:
                 pipeline.to(device)
         else:
             pipeline.to(device)
-        
+
         return (pipeline,)
+
+
         
-class Trellis2MeshWithVoxelGenerator:
+class Trellis2_GGUFMeshWithVoxelGenerator:
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -446,7 +478,7 @@ class Trellis2MeshWithVoxelGenerator:
     RETURN_TYPES = ("MESHWITHVOXEL", "BVH", )
     RETURN_NAMES = ("mesh", "bvh", )
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2Wrapper (GGUF)"
     OUTPUT_NODE = True
 
     def process(self, pipeline, image, seed, pipeline_type, sparse_structure_steps, shape_steps, texture_steps, max_num_tokens, max_views, sparse_structure_resolution, generate_texture_slat, use_tiled_decoder):
@@ -483,7 +515,7 @@ class Trellis2MeshWithVoxelGenerator:
         
         return (mesh, bvh,)    
 
-class Trellis2LoadImageWithTransparency:
+class Trellis2_GGUFLoadImageWithTransparency:
     @classmethod
     def INPUT_TYPES(s):
         input_dir = folder_paths.get_input_directory()
@@ -493,7 +525,7 @@ class Trellis2LoadImageWithTransparency:
                     {"image": (sorted(files), {"image_upload": True})},
                 }
 
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2Wrapper (GGUF)"
 
     RETURN_TYPES = ("IMAGE", "MASK", "IMAGE", )
     RETURN_NAMES = ("image", "mask", "image_with_alpha")
@@ -565,7 +597,7 @@ class Trellis2LoadImageWithTransparency:
 
         return True  
 
-class Trellis2SimplifyMesh:
+class Trellis2_GGUFSimplifyMesh:
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -579,7 +611,7 @@ class Trellis2SimplifyMesh:
     RETURN_TYPES = ("MESHWITHVOXEL", )
     RETURN_NAMES = ("mesh", )
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2Wrapper (GGUF)"
     OUTPUT_NODE = True
 
     def process(self, mesh, target_face_num, method):        
@@ -593,7 +625,7 @@ class Trellis2SimplifyMesh:
         
         return (mesh_copy,)     
 
-class Trellis2SimplifyTrimesh:
+class Trellis2_GGUFSimplifyTrimesh:
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -607,7 +639,7 @@ class Trellis2SimplifyTrimesh:
     RETURN_TYPES = ("TRIMESH", )
     RETURN_NAMES = ("trimesh", )
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2Wrapper (GGUF)"
     OUTPUT_NODE = True
 
     def process(self, trimesh, target_face_num, method):        
@@ -630,7 +662,7 @@ class Trellis2SimplifyTrimesh:
         
         return (mesh_copy,)   
 
-class Trellis2ProgressiveSimplify:
+class Trellis2_GGUFProgressiveSimplify:
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -652,7 +684,7 @@ class Trellis2ProgressiveSimplify:
     RETURN_TYPES = ("TRIMESH", "MESHWITHVOXEL",)
     RETURN_NAMES = ("trimesh", "mesh", )
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2Wrapper (GGUF)"
     OUTPUT_NODE = True
 
     def process(self, max_edge_length, max_triangle_aspect_ratio, strategy, stabilizer, touch_near_boundary_edges, optimize_vertex_positions, angle_based_weights, trimesh = None, mesh = None):        
@@ -725,7 +757,7 @@ class Trellis2ProgressiveSimplify:
         
         return new_vertices, new_faces        
         
-class Trellis2MeshWithVoxelToTrimesh:
+class Trellis2_GGUFMeshWithVoxelToTrimesh:
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -738,7 +770,7 @@ class Trellis2MeshWithVoxelToTrimesh:
     RETURN_TYPES = ("TRIMESH", )
     RETURN_NAMES = ("trimesh", )
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2Wrapper (GGUF)"
     OUTPUT_NODE = True
 
     def process(self, mesh, reorient_vertices):       
@@ -759,13 +791,13 @@ class Trellis2MeshWithVoxelToTrimesh:
         
         return (trimesh,)
         
-class Trellis2ExportMesh:
+class Trellis2_GGUFExportMesh:
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
                 "trimesh": ("TRIMESH",),
-                "filename_prefix": ("STRING", {"default": "3D/Trellis2"}),
+                "filename_prefix": ("STRING", {"default": "3D/Trellis2-GGUF"}),
                 "file_format": (["glb", "obj", "ply", "stl", "3mf", "dae"],),
             }
         }
@@ -773,7 +805,7 @@ class Trellis2ExportMesh:
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("glb_path",)
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2Wrapper (GGUF)"
     OUTPUT_NODE = True
 
     def process(self, trimesh, filename_prefix, file_format):        
@@ -794,7 +826,7 @@ class Trellis2ExportMesh:
         
         return (str(relative_path), )        
         
-class Trellis2PostProcessMesh:
+class Trellis2_GGUFPostProcessMesh:
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -817,7 +849,7 @@ class Trellis2PostProcessMesh:
     RETURN_TYPES = ("MESHWITHVOXEL",)
     RETURN_NAMES = ("mesh",)
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2Wrapper (GGUF)"
     OUTPUT_NODE = True
 
     def process(self, 
@@ -930,7 +962,7 @@ class Trellis2PostProcessMesh:
                 
         return (mesh_copy,)
        
-class Trellis2UnWrapAndRasterizer:
+class Trellis2_GGUFUnWrapAndRasterizer:
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -952,7 +984,7 @@ class Trellis2UnWrapAndRasterizer:
     RETURN_TYPES = ("TRIMESH","IMAGE","IMAGE",)
     RETURN_NAMES = ("trimesh","base_color_texture", "metallic_roughness_texture",)
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2Wrapper (GGUF)"
     OUTPUT_NODE = True
 
     def process(self, mesh, mesh_cluster_threshold_cone_half_angle_rad, mesh_cluster_refine_iterations, mesh_cluster_global_iterations, mesh_cluster_smooth_strength, texture_size, texture_alpha_mode, double_side_material, bake_on_vertices,use_custom_normals,bvh):
@@ -1216,7 +1248,7 @@ class Trellis2UnWrapAndRasterizer:
                 
         return (textured_mesh, baseColorTexture, metallicRoughnessTexture, )
         
-class Trellis2MeshWithVoxelAdvancedGenerator:
+class Trellis2_GGUFMeshWithVoxelAdvancedGenerator:
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -1254,7 +1286,7 @@ class Trellis2MeshWithVoxelAdvancedGenerator:
     RETURN_TYPES = ("MESHWITHVOXEL","BVH", )
     RETURN_NAMES = ("mesh", "bvh", )
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2Wrapper (GGUF)"
     OUTPUT_NODE = True
 
     def process(self, pipeline, image, seed, pipeline_type, sparse_structure_steps, 
@@ -1318,7 +1350,7 @@ class Trellis2MeshWithVoxelAdvancedGenerator:
         
         return (mesh,bvh,)         
 
-class Trellis2MeshWithVoxelMultiViewGenerator:
+class Trellis2_GGUFMeshWithVoxelMultiViewGenerator:
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -1362,7 +1394,7 @@ class Trellis2MeshWithVoxelMultiViewGenerator:
     RETURN_TYPES = ("MESHWITHVOXEL","BVH", )
     RETURN_NAMES = ("mesh", "bvh", )
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2Wrapper (GGUF)"
     OUTPUT_NODE = True
 
     def process(self, pipeline, front_image, seed, pipeline_type, sparse_structure_steps, 
@@ -1452,7 +1484,7 @@ class Trellis2MeshWithVoxelMultiViewGenerator:
         
         return (mesh,bvh,)
 
-class Trellis2PostProcessAndUnWrapAndRasterizer:
+class Trellis2_GGUFPostProcessAndUnWrapAndRasterizer:
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -1483,7 +1515,7 @@ class Trellis2PostProcessAndUnWrapAndRasterizer:
     RETURN_TYPES = ("TRIMESH","IMAGE","IMAGE",)
     RETURN_NAMES = ("trimesh","base_color_texture","metallic_roughness_texture",)
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2Wrapper (GGUF)"
     OUTPUT_NODE = True
 
     def process(self, mesh, mesh_cluster_threshold_cone_half_angle_rad, mesh_cluster_refine_iterations, mesh_cluster_global_iterations, mesh_cluster_smooth_strength, texture_size, remesh, remesh_band, remesh_project, target_face_num, simplify_method, fill_holes, texture_alpha_mode, dual_contouring_resolution, double_side_material, remove_floaters, bake_on_vertices,use_custom_normals,bvh,remove_inner_faces):
@@ -1895,7 +1927,7 @@ class Trellis2PostProcessAndUnWrapAndRasterizer:
         
         return (textured_mesh, baseColorTexture, metallicRoughnessTexture,)    
 
-class Trellis2Remesh:
+class Trellis2_GGUFRemesh:
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -1912,7 +1944,7 @@ class Trellis2Remesh:
     RETURN_TYPES = ("MESHWITHVOXEL",)
     RETURN_NAMES = ("mesh",)
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2Wrapper (GGUF)"
     OUTPUT_NODE = True
 
     def process(self, mesh, remesh_band, remesh_project, dual_contouring_resolution, remove_floaters, remove_inner_faces):
@@ -2010,7 +2042,7 @@ class Trellis2Remesh:
                 
         return (mesh_copy,)
         
-class Trellis2ReconstructMesh:
+class Trellis2_GGUFReconstructMesh:
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -2024,7 +2056,7 @@ class Trellis2ReconstructMesh:
     RETURN_TYPES = ("MESHWITHVOXEL",)
     RETURN_NAMES = ("mesh",)
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2Wrapper (GGUF)"
     OUTPUT_NODE = True
 
     def process(self, mesh, remesh_band, resolution):
@@ -2046,7 +2078,7 @@ class Trellis2ReconstructMesh:
                 
         return (mesh_copy,)   
 
-class Trellis2ReconstructMeshWithQuad:
+class Trellis2_GGUFReconstructMeshWithQuad:
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -2062,7 +2094,7 @@ class Trellis2ReconstructMeshWithQuad:
     RETURN_TYPES = ("MESHWITHVOXEL",)
     RETURN_NAMES = ("mesh",)
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2Wrapper (GGUF)"
     OUTPUT_NODE = True
 
     def process(self, mesh, remesh_band, resolution, remove_floaters, remove_inner_faces):
@@ -2095,7 +2127,7 @@ class Trellis2ReconstructMeshWithQuad:
                 
         return (mesh_copy,)         
         
-class Trellis2MeshTexturing:
+class Trellis2_GGUFMeshTexturing:
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -2132,7 +2164,7 @@ class Trellis2MeshTexturing:
     RETURN_TYPES = ("TRIMESH","IMAGE","IMAGE",)
     RETURN_NAMES = ("trimesh","base_color_texture","metallic_roughness_texture",)
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2Wrapper (GGUF)"
     OUTPUT_NODE = True
 
     def process(self, pipeline, image, trimesh, seed, texture_steps, texture_guidance_strength, texture_guidance_rescale, texture_rescale_t, resolution, texture_size, texture_alpha_mode, double_side_material, texture_guidance_interval_start, texture_guidance_interval_end, max_views,bake_on_vertices,use_custom_normals,mesh_cluster_threshold_cone_half_angle_rad, use_tiled_encoder=False, encoder_tile_size=512, encoder_overlap=24, use_tiled_decoder_for_texture=False, decoder_tile_size=120, decoder_overlap=48):
@@ -2170,7 +2202,7 @@ class Trellis2MeshTexturing:
         
         return (textured_mesh, baseColorTexture, metallicRoughnessTexture, )
         
-class Trellis2MeshTexturingMultiView:
+class Trellis2_GGUFMeshTexturingMultiView:
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -2211,7 +2243,7 @@ class Trellis2MeshTexturingMultiView:
     RETURN_TYPES = ("TRIMESH","IMAGE","IMAGE",)
     RETURN_NAMES = ("trimesh","base_color_texture","metallic_roughness_texture",)
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2Wrapper (GGUF)"
     OUTPUT_NODE = True
 
     def process(self, 
@@ -2287,7 +2319,7 @@ class Trellis2MeshTexturingMultiView:
         
         return (textured_mesh, baseColorTexture, metallicRoughnessTexture, )        
         
-class Trellis2LoadMesh:
+class Trellis2_GGUFLoadMesh:
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -2300,7 +2332,7 @@ class Trellis2LoadMesh:
     OUTPUT_TOOLTIPS = ("The glb model with mesh to texturize.",)
     
     FUNCTION = "load"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2Wrapper (GGUF)"
     DESCRIPTION = "Loads a glb model from the given path."
 
     def load(self, glb_path):
@@ -2311,7 +2343,7 @@ class Trellis2LoadMesh:
         
         return (trimesh,)  
         
-class Trellis2PreProcessImage:
+class Trellis2_GGUFPreProcessImage:
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -2325,7 +2357,7 @@ class Trellis2PreProcessImage:
     RETURN_NAMES = ("image",)
     
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2Wrapper (GGUF)"
 
     def process(self, image, padding, remove_background):
         image = tensor2pil(image)
@@ -2398,7 +2430,7 @@ class Trellis2PreProcessImage:
         output = Image.fromarray((output * 255).astype(np.uint8))
         return output    
 
-class Trellis2MeshRefiner:
+class Trellis2_GGUFMeshRefiner:
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -2440,7 +2472,7 @@ class Trellis2MeshRefiner:
     RETURN_TYPES = ("MESHWITHVOXEL", "BVH", )
     RETURN_NAMES = ("mesh", "bvh", )
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2Wrapper (GGUF)"
     OUTPUT_NODE = True
 
     def process(self, pipeline, trimesh, image, seed, resolution,
@@ -2497,7 +2529,7 @@ class Trellis2MeshRefiner:
         
         return (mesh, bvh,)        
 
-class Trellis2PostProcess2:
+class Trellis2_GGUFPostProcess2:
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -2515,7 +2547,7 @@ class Trellis2PostProcess2:
     RETURN_TYPES = ("MESHWITHVOXEL",)
     RETURN_NAMES = ("mesh",)
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2Wrapper (GGUF)"
     OUTPUT_NODE = True
 
     def process(self, mesh, fill_holes, fix_normals, fix_face_orientation, remove_duplicate_faces, weld_vertices, weld_vertices_digits,):
@@ -2571,7 +2603,7 @@ class Trellis2PostProcess2:
                 
         return (mesh_copy,)    
 
-class Trellis2OvoxelExportToGLB:
+class Trellis2_GGUFOvoxelExportToGLB:
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -2586,7 +2618,7 @@ class Trellis2OvoxelExportToGLB:
     RETURN_TYPES = ("TRIMESH",)
     RETURN_NAMES = ("trimesh",)
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2Wrapper (GGUF)"
     OUTPUT_NODE = True
 
     def process(self, mesh, resolution, texture_size, target_face_num):
@@ -2610,7 +2642,7 @@ class Trellis2OvoxelExportToGLB:
                 
         return (glb,)
 
-class Trellis2TrimeshToMeshWithVoxel:
+class Trellis2_GGUFTrimeshToMeshWithVoxel:
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -2623,7 +2655,7 @@ class Trellis2TrimeshToMeshWithVoxel:
     RETURN_TYPES = ("MESHWITHVOXEL", )
     RETURN_NAMES = ("mesh", )
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2Wrapper (GGUF)"
     OUTPUT_NODE = True
 
     def process(self, trimesh, resolution):       
@@ -2674,7 +2706,7 @@ class Trellis2TrimeshToMeshWithVoxel:
                     
         return mvoxel
         
-class Trellis2Continue:
+class Trellis2_GGUFContinue:
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -2687,13 +2719,13 @@ class Trellis2Continue:
     RETURN_TYPES = (any, any, )
     RETURN_NAMES = ("output_1", "output_2", )
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2Wrapper (GGUF)"
     OUTPUT_NODE = True
 
     def process(self, input_1, input_2):        
         return (input_1, input_2,)
         
-class Trellis2MeshWithVoxelToMeshlibMesh:
+class Trellis2_GGUFMeshWithVoxelToMeshlibMesh:
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -2705,14 +2737,14 @@ class Trellis2MeshWithVoxelToMeshlibMesh:
     RETURN_TYPES = ("MESHLIB_MESH", )
     RETURN_NAMES = ("meshlib_mesh",)
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2Wrapper (GGUF)"
     OUTPUT_NODE = True
 
     def process(self, mesh):        
         meshlib_mesh = mrmeshnumpy.meshFromFacesVerts(mesh.faces.cpu().numpy(), mesh.vertices.cpu().numpy())                                 
         return (meshlib_mesh,)
 
-class Trellis2FillHolesWithMeshlib:
+class Trellis2_GGUFFillHolesWithMeshlib:
     """Fill all holes in a mesh"""
     
     @classmethod
@@ -2726,7 +2758,7 @@ class Trellis2FillHolesWithMeshlib:
     RETURN_TYPES = ("MESHWITHVOXEL", "INT")
     RETURN_NAMES = ("mesh", "holes_filled")
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2Wrapper (GGUF)"
     DESCRIPTION = "Fill all holes in a mesh using optimal triangulation."
 
     def process(self, mesh):
@@ -2786,7 +2818,7 @@ class Trellis2FillHolesWithMeshlib:
         
         return (mesh_copy, holes_filled) 
         
-class Trellis2SmoothNormals:    
+class Trellis2_GGUFSmoothNormals:    
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -2798,7 +2830,7 @@ class Trellis2SmoothNormals:
     RETURN_TYPES = ("TRIMESH",)
     RETURN_NAMES = ("trimesh",)
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2Wrapper (GGUF)"
 
     def process(self, trimesh):
         new_mesh = trimesh.copy()
@@ -2806,7 +2838,7 @@ class Trellis2SmoothNormals:
         
         return (new_mesh,)         
 
-class Trellis2RemeshWithQuad:
+class Trellis2_GGUFRemeshWithQuad:
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -2823,7 +2855,7 @@ class Trellis2RemeshWithQuad:
     RETURN_TYPES = ("MESHWITHVOXEL",)
     RETURN_NAMES = ("mesh",)
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2Wrapper (GGUF)"
     OUTPUT_NODE = True
 
     def process(self, mesh, remesh_band, remesh_project, dual_contouring_resolution, remove_floaters, remove_inner_faces):
@@ -2921,7 +2953,7 @@ class Trellis2RemeshWithQuad:
                 
         return (mesh_copy,)   
 
-class Trellis2BatchSimplifyMeshAndExport:
+class Trellis2_GGUFBatchSimplifyMeshAndExport:
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -2941,7 +2973,7 @@ class Trellis2BatchSimplifyMeshAndExport:
     RETURN_TYPES = ("STRING", )
     RETURN_NAMES = ("lst_glb_path", )
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2Wrapper (GGUF)"
     OUTPUT_NODE = True
 
     def process(self, mesh, target_face_num, method, fill_holes, reorient_vertices, filename_prefix, file_format, weld_vertices, weld_vertices_digits):
@@ -3051,7 +3083,7 @@ class Trellis2BatchSimplifyMeshAndExport:
         
         return (lst_output_mesh,)   
 
-class Trellis2WeldVertices:    
+class Trellis2_GGUFWeldVertices:    
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -3066,7 +3098,7 @@ class Trellis2WeldVertices:
     RETURN_TYPES = ("TRIMESH",)
     RETURN_NAMES = ("trimesh",)
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2Wrapper (GGUF)"
 
     def process(self, trimesh, merge_texture, merge_normals, digits):
         new_mesh = trimesh.copy()
@@ -3083,7 +3115,7 @@ class Trellis2WeldVertices:
         
         return (new_mesh,)   
 
-class Trellis2StringSelector:    
+class Trellis2_GGUFStringSelector:    
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -3096,7 +3128,7 @@ class Trellis2StringSelector:
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("string",)
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2Wrapper (GGUF)"
 
     def process(self, strings, index):
         if isinstance(strings, list):
@@ -3113,7 +3145,7 @@ class Trellis2StringSelector:
         
         return (string,)
 
-class Trellis2FillHolesWithCuMesh:
+class Trellis2_GGUFFillHolesWithCuMesh:
     """Fill all holes in a mesh"""
     
     @classmethod
@@ -3128,7 +3160,7 @@ class Trellis2FillHolesWithCuMesh:
     RETURN_TYPES = ("MESHWITHVOXEL",)
     RETURN_NAMES = ("mesh",)
     FUNCTION = "process"
-    CATEGORY = "Trellis2Wrapper"
+    CATEGORY = "Trellis2Wrapper (GGUF)"
 
     def process(self, mesh, max_permieters):
         mesh_copy = copy.deepcopy(mesh)
@@ -3137,74 +3169,74 @@ class Trellis2FillHolesWithCuMesh:
         return (mesh_copy,)         
         
 NODE_CLASS_MAPPINGS = {
-    "Trellis2LoadModel": Trellis2LoadModel,
-    "Trellis2MeshWithVoxelGenerator": Trellis2MeshWithVoxelGenerator,
-    "Trellis2LoadImageWithTransparency": Trellis2LoadImageWithTransparency,
-    "Trellis2SimplifyMesh": Trellis2SimplifyMesh,
-    "Trellis2MeshWithVoxelToTrimesh": Trellis2MeshWithVoxelToTrimesh,
-    "Trellis2ExportMesh": Trellis2ExportMesh,
-    "Trellis2PostProcessMesh": Trellis2PostProcessMesh,
-    "Trellis2UnWrapAndRasterizer": Trellis2UnWrapAndRasterizer,
-    "Trellis2MeshWithVoxelAdvancedGenerator": Trellis2MeshWithVoxelAdvancedGenerator,
-    "Trellis2PostProcessAndUnWrapAndRasterizer": Trellis2PostProcessAndUnWrapAndRasterizer,
-    "Trellis2Remesh": Trellis2Remesh,
-    "Trellis2MeshTexturing": Trellis2MeshTexturing,
-    "Trellis2LoadMesh": Trellis2LoadMesh,
-    "Trellis2PreProcessImage": Trellis2PreProcessImage,
-    "Trellis2MeshRefiner": Trellis2MeshRefiner,
-    "Trellis2PostProcess2": Trellis2PostProcess2,
-    "Trellis2OvoxelExportToGLB": Trellis2OvoxelExportToGLB,
-    "Trellis2TrimeshToMeshWithVoxel": Trellis2TrimeshToMeshWithVoxel,
-    "Trellis2SimplifyTrimesh": Trellis2SimplifyTrimesh,
-    "Trellis2Continue": Trellis2Continue,
-    "Trellis2ProgressiveSimplify": Trellis2ProgressiveSimplify,
-    "Trellis2ReconstructMesh": Trellis2ReconstructMesh,
-    "Trellis2MeshWithVoxelToMeshlibMesh": Trellis2MeshWithVoxelToMeshlibMesh,
-    "Trellis2FillHolesWithMeshlib": Trellis2FillHolesWithMeshlib,
-    "Trellis2SmoothNormals": Trellis2SmoothNormals,
-    "Trellis2RemeshWithQuad": Trellis2RemeshWithQuad,
-    "Trellis2BatchSimplifyMeshAndExport": Trellis2BatchSimplifyMeshAndExport,
-    "Trellis2MeshWithVoxelMultiViewGenerator": Trellis2MeshWithVoxelMultiViewGenerator,
-    "Trellis2MeshTexturingMultiView": Trellis2MeshTexturingMultiView,
-    "Trellis2WeldVertices": Trellis2WeldVertices,
-    "Trellis2ReconstructMeshWithQuad": Trellis2ReconstructMeshWithQuad,
-    "Trellis2StringSelector": Trellis2StringSelector,
-    "Trellis2FillHolesWithCuMesh": Trellis2FillHolesWithCuMesh,
+    "Trellis2LoadModel_GGUF": Trellis2_GGUFLoadModel,
+    "Trellis2MeshWithVoxelGenerator_GGUF": Trellis2_GGUFMeshWithVoxelGenerator,
+    "Trellis2LoadImageWithTransparency_GGUF": Trellis2_GGUFLoadImageWithTransparency,
+    "Trellis2SimplifyMesh_GGUF": Trellis2_GGUFSimplifyMesh,
+    "Trellis2MeshWithVoxelToTrimesh_GGUF": Trellis2_GGUFMeshWithVoxelToTrimesh,
+    "Trellis2ExportMesh_GGUF": Trellis2_GGUFExportMesh,
+    "Trellis2PostProcessMesh_GGUF": Trellis2_GGUFPostProcessMesh,
+    "Trellis2UnWrapAndRasterizer_GGUF": Trellis2_GGUFUnWrapAndRasterizer,
+    "Trellis2MeshWithVoxelAdvancedGenerator_GGUF": Trellis2_GGUFMeshWithVoxelAdvancedGenerator,
+    "Trellis2PostProcessAndUnWrapAndRasterizer_GGUF": Trellis2_GGUFPostProcessAndUnWrapAndRasterizer,
+    "Trellis2Remesh_GGUF": Trellis2_GGUFRemesh,
+    "Trellis2MeshTexturing_GGUF": Trellis2_GGUFMeshTexturing,
+    "Trellis2LoadMesh_GGUF": Trellis2_GGUFLoadMesh,
+    "Trellis2PreProcessImage_GGUF": Trellis2_GGUFPreProcessImage,
+    "Trellis2MeshRefiner_GGUF": Trellis2_GGUFMeshRefiner,
+    "Trellis2PostProcess2_GGUF": Trellis2_GGUFPostProcess2,
+    "Trellis2OvoxelExportToGLB_GGUF": Trellis2_GGUFOvoxelExportToGLB,
+    "Trellis2TrimeshToMeshWithVoxel_GGUF": Trellis2_GGUFTrimeshToMeshWithVoxel,
+    "Trellis2SimplifyTrimesh_GGUF": Trellis2_GGUFSimplifyTrimesh,
+    "Trellis2Continue_GGUF": Trellis2_GGUFContinue,
+    "Trellis2ProgressiveSimplify_GGUF": Trellis2_GGUFProgressiveSimplify,
+    "Trellis2ReconstructMesh_GGUF": Trellis2_GGUFReconstructMesh,
+    "Trellis2MeshWithVoxelToMeshlibMesh_GGUF": Trellis2_GGUFMeshWithVoxelToMeshlibMesh,
+    "Trellis2FillHolesWithMeshlib_GGUF": Trellis2_GGUFFillHolesWithMeshlib,
+    "Trellis2SmoothNormals_GGUF": Trellis2_GGUFSmoothNormals,
+    "Trellis2RemeshWithQuad_GGUF": Trellis2_GGUFRemeshWithQuad,
+    "Trellis2BatchSimplifyMeshAndExport_GGUF": Trellis2_GGUFBatchSimplifyMeshAndExport,
+    "Trellis2MeshWithVoxelMultiViewGenerator_GGUF": Trellis2_GGUFMeshWithVoxelMultiViewGenerator,
+    "Trellis2MeshTexturingMultiView_GGUF": Trellis2_GGUFMeshTexturingMultiView,
+    "Trellis2WeldVertices_GGUF": Trellis2_GGUFWeldVertices,
+    "Trellis2ReconstructMeshWithQuad_GGUF": Trellis2_GGUFReconstructMeshWithQuad,
+    "Trellis2StringSelector_GGUF": Trellis2_GGUFStringSelector,
+    "Trellis2FillHolesWithCuMesh_GGUF": Trellis2_GGUFFillHolesWithCuMesh,
     }
     
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "Trellis2LoadModel": "Trellis2 - LoadModel",
-    "Trellis2MeshWithVoxelGenerator": "Trellis2 - Mesh With Voxel Generator",
-    "Trellis2LoadImageWithTransparency": "Trellis2 - Load Image with Transparency",
-    "Trellis2SimplifyMesh": "Trellis2 - Simplify Mesh",
-    "Trellis2MeshWithVoxelToTrimesh": "Trellis2 - Mesh With Voxel To Trimesh",
-    "Trellis2ExportMesh": "Trellis2 - Export Mesh",
-    "Trellis2PostProcessMesh": "Trellis2 - PostProcess Mesh (using Cumesh)",
-    "Trellis2UnWrapAndRasterizer": "Trellis2 - UV Unwrap and Rasterize",
-    "Trellis2MeshWithVoxelAdvancedGenerator": "Trellis2 - Mesh With Voxel Advanced Generator",
-    "Trellis2PostProcessAndUnWrapAndRasterizer": "Trellis2 - Post Process/UnWrap and Rasterize",
-    "Trellis2Remesh": "Trellis2 - Remesh",
-    "Trellis2MeshTexturing": "Trellis2 - Mesh Texturing",
-    "Trellis2LoadMesh": "Trellis2 - Load Mesh",
-    "Trellis2PreProcessImage": "Trellis2 - PreProcess Image",
-    "Trellis2MeshRefiner": "Trellis2 - Mesh Refiner",
-    "Trellis2PostProcess2": "Trellis2 - PostProcess Mesh (using Trimesh)",
-    "Trellis2OvoxelExportToGLB": "Trellis2 - Ovoxel Export to GLB",
-    "Trellis2TrimeshToMeshWithVoxel": "Trellis2 - Trimesh to Mesh with Voxel",
-    "Trellis2SimplifyTrimesh": "Trellis2 - Simplify Trimesh",
-    "Trellis2Continue": "Trellis2 - Continue",
-    "Trellis2ProgressiveSimplify": "Trellis2 - Progressive Simplify",
-    "Trellis2ReconstructMesh": "Trellis2 - Reconstruct Mesh",
-    "Trellis2MeshWithVoxelToMeshlibMesh": "Trellis2 - Mesh with Voxel to Meshlib Mesh",
-    "Trellis2FillHolesWithMeshlib": "Trellis2 - Fill Holes with Meshlib",
-    "Trellis2SmoothNormals": "Trellis2 - Smooth Normals",
-    "Trellis2RemeshWithQuad": "Trellis2 - Remesh With Quad",
-    "Trellis2BatchSimplifyMeshAndExport": "Trellis2 - Batch Simplify Mesh And Export",
-    "Trellis2MeshWithVoxelMultiViewGenerator": "Trellis2 - Mesh With Voxel Multi-View Generator",
-    "Trellis2MeshTexturingMultiView": "Trellis2 - Mesh Texturing Multi-View",
-    "Trellis2WeldVertices": "Trellis2 - Weld Vertices",
-    "Trellis2ReconstructMeshWithQuad": "Trellis2 - Reconstruct Mesh With Quad",
-    "Trellis2StringSelector": "Trellis2 - String Selector",
-    "Trellis2FillHolesWithCuMesh": "Trellis2 - Fill Holes with CuMesh",
+    "Trellis2LoadModel_GGUF": "Trellis2 - LoadModel (GGUF)",
+    "Trellis2MeshWithVoxelGenerator_GGUF": "Trellis2 - Mesh With Voxel Generator (GGUF)",
+    "Trellis2LoadImageWithTransparency_GGUF": "Trellis2 - Load Image with Transparency (GGUF)",
+    "Trellis2SimplifyMesh_GGUF": "Trellis2 - Simplify Mesh (GGUF)",
+    "Trellis2MeshWithVoxelToTrimesh_GGUF": "Trellis2 - Mesh With Voxel To Trimesh (GGUF)",
+    "Trellis2ExportMesh_GGUF": "Trellis2 - Export Mesh (GGUF)",
+    "Trellis2PostProcessMesh_GGUF": "Trellis2 - PostProcess Mesh (using Cumesh) (GGUF)",
+    "Trellis2UnWrapAndRasterizer_GGUF": "Trellis2 - UV Unwrap and Rasterize (GGUF)",
+    "Trellis2MeshWithVoxelAdvancedGenerator_GGUF": "Trellis2 - Mesh With Voxel Advanced Generator (GGUF)",
+    "Trellis2PostProcessAndUnWrapAndRasterizer_GGUF": "Trellis2 - Post Process/UnWrap and Rasterize (GGUF)",
+    "Trellis2Remesh_GGUF": "Trellis2 - Remesh (GGUF)",
+    "Trellis2MeshTexturing_GGUF": "Trellis2 - Mesh Texturing (GGUF)",
+    "Trellis2LoadMesh_GGUF": "Trellis2 - Load Mesh (GGUF)",
+    "Trellis2PreProcessImage_GGUF": "Trellis2 - PreProcess Image (GGUF)",
+    "Trellis2MeshRefiner_GGUF": "Trellis2 - Mesh Refiner (GGUF)",
+    "Trellis2PostProcess2_GGUF": "Trellis2 - PostProcess Mesh (using Trimesh) (GGUF)",
+    "Trellis2OvoxelExportToGLB_GGUF": "Trellis2 - Ovoxel Export to GLB (GGUF)",
+    "Trellis2TrimeshToMeshWithVoxel_GGUF": "Trellis2 - Trimesh to Mesh with Voxel (GGUF)",
+    "Trellis2SimplifyTrimesh_GGUF": "Trellis2 - Simplify Trimesh (GGUF)",
+    "Trellis2Continue_GGUF": "Trellis2 - Continue (GGUF)",
+    "Trellis2ProgressiveSimplify_GGUF": "Trellis2 - Progressive Simplify (GGUF)",
+    "Trellis2ReconstructMesh_GGUF": "Trellis2 - Reconstruct Mesh (GGUF)",
+    "Trellis2MeshWithVoxelToMeshlibMesh_GGUF": "Trellis2 - Mesh with Voxel to Meshlib Mesh (GGUF)",
+    "Trellis2FillHolesWithMeshlib_GGUF": "Trellis2 - Fill Holes with Meshlib (GGUF)",
+    "Trellis2SmoothNormals_GGUF": "Trellis2 - Smooth Normals (GGUF)",
+    "Trellis2RemeshWithQuad_GGUF": "Trellis2 - Remesh With Quad (GGUF)",
+    "Trellis2BatchSimplifyMeshAndExport_GGUF": "Trellis2 - Batch Simplify Mesh And Export (GGUF)",
+    "Trellis2MeshWithVoxelMultiViewGenerator_GGUF": "Trellis2 - Mesh With Voxel Multi-View Generator (GGUF)",
+    "Trellis2MeshTexturingMultiView_GGUF": "Trellis2 - Mesh Texturing Multi-View (GGUF)",
+    "Trellis2WeldVertices_GGUF": "Trellis2 - Weld Vertices (GGUF)",
+    "Trellis2ReconstructMeshWithQuad_GGUF": "Trellis2 - Reconstruct Mesh With Quad (GGUF)",
+    "Trellis2StringSelector_GGUF": "Trellis2 - String Selector (GGUF)",
+    "Trellis2FillHolesWithCuMesh_GGUF": "Trellis2 - Fill Holes with CuMesh (GGUF)",
     }

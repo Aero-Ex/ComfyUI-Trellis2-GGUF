@@ -38,6 +38,12 @@ _REPO_PATH_MAP = {
 
 def _remote_path(basename: str, suffix: str) -> str:
     """Map a ckpts basename to its Aero-Ex repo path (e.g. 'shape/..._Q8_0.gguf')."""
+    # Normalize suffix for GGUF quants that might have different naming in repo
+    if suffix.endswith(".gguf"):
+        # Handle Q5_K -> Q5_K_M mapping if common
+        if "_Q5_K.gguf" in suffix: suffix = suffix.replace("_Q5_K.gguf", "_Q5_K_M.gguf")
+        if "_Q4_K.gguf" in suffix: suffix = suffix.replace("_Q4_K.gguf", "_Q4_K_M.gguf")
+
     for prefix, folder in _REPO_PATH_MAP.items():
         if basename.startswith(prefix):
             return f"{folder}{basename}{suffix}"
@@ -136,12 +142,16 @@ def from_pretrained(path: str, enable_gguf: bool = False, gguf_quant: str = "Q8_
     """
     Load a model from a pretrained checkpoint.
 
+    This function ONLY performs local file resolution — it NEVER downloads anything.
+    All downloading must be done first via Trellis2LoadModel which calls
+    model_manager.ensure_model_files().
+
     Args:
-        path: The path to the checkpoint. Can be either local path or a Hugging Face model name.
-              NOTE: config file and model file should take the name f'{path}.json' and f'{path}.safetensors' respectively.
-        enable_gguf: Enable GGUF loading (GGML quantization).
-        gguf_quant: GGUF quantization type (e.g., "Q8_0", "Q4_K").
-        **kwargs: Additional arguments for the model constructor.
+        path: Absolute path prefix for the model (without .json / .safetensors / .gguf).
+              e.g.  /path/to/models/Trellis2/ckpts/ss_flow_img_dit_1_3B_64_bf16
+        enable_gguf: Load as GGUF instead of Safetensors.
+        gguf_quant:  GGUF quantization type (e.g. "Q6_K").
+        precision:   Safetensors precision suffix override (e.g. "fp8", "bf16").
     """
     import os
     import sys
@@ -152,94 +162,35 @@ def from_pretrained(path: str, enable_gguf: bool = False, gguf_quant: str = "Q8_
     from safetensors.torch import load_file
     from ..utils import gguf_utils
 
-    # Strip GGUF_ prefix if present (e.g. "GGUF_Q8_0" -> "Q8_0")
+    # Import model_manager for centralized file resolution
+    import importlib.util, sys as _sys
+    _mm_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "model_manager.py")
+    if "trellis2_model_manager" not in _sys.modules:
+        spec = importlib.util.spec_from_file_location("trellis2_model_manager", _mm_path)
+        _mm = importlib.util.module_from_spec(spec)
+        _sys.modules["trellis2_model_manager"] = _mm
+        spec.loader.exec_module(_mm)
+    model_manager = _sys.modules["trellis2_model_manager"]
+
     if gguf_quant and gguf_quant.startswith("GGUF_"):
         gguf_quant = gguf_quant[5:]
 
-    model_file_quant = f"{path}_{gguf_quant}.gguf"
-    model_file_gguf  = f"{path}.gguf"
+    precision = kwargs.pop("precision", None)
+    basename = os.path.basename(path)
 
-    is_gguf = False
+    print(f"[Trellis2-models] from_pretrained: {basename}  enable_gguf={enable_gguf}  quant={gguf_quant}  precision={precision}", file=sys.stderr)
 
-    print(f"[Trellis2-models] from_pretrained: {os.path.basename(path)}  enable_gguf={enable_gguf}  quant={gguf_quant}", file=sys.stderr)
+    # ── Resolve local paths via model_manager (NO downloads here) ────────
+    config_file, model_file, is_gguf = model_manager.resolve_local_path(
+        basename,
+        enable_gguf=enable_gguf,
+        gguf_quant=gguf_quant,
+        precision=precision,
+    )
 
-    if enable_gguf and os.path.exists(model_file_quant):
-        print(f"[Trellis2-models]   ✔ Found GGUF ({gguf_quant}): {model_file_quant}", file=sys.stderr)
-        config_file = f"{path}.json"
-        model_file  = model_file_quant
-        is_gguf = True
-    elif enable_gguf and os.path.exists(model_file_gguf):
-        print(f"[Trellis2-models]   ✔ Found generic GGUF: {model_file_gguf}", file=sys.stderr)
-        config_file = f"{path}.json"
-        model_file  = model_file_gguf
-        is_gguf = True
-    elif enable_gguf:
-        # Auto-download from Aero-Ex/Trellis2-GGUF using deterministic path map
-        basename = os.path.basename(path)
-        remote_gguf = _remote_path(basename, f"_{gguf_quant}.gguf")
-        remote_gguf_plain = _remote_path(basename, ".gguf")
-        remote_json = _remote_path(basename, ".json")
-        ckpts_dir = os.path.dirname(model_file_quant)
+    print(f"[Trellis2-models] Resolved: {os.path.basename(model_file)}", file=sys.stderr)
 
-        print(f"[Trellis2-models]   ⚠ GGUF not found locally — downloading from {_GGUF_REPO}", file=sys.stderr)
-        print(f"[Trellis2-models]   Remote path: {remote_gguf}", file=sys.stderr)
-        try:
-            from huggingface_hub import hf_hub_download
-            os.makedirs(ckpts_dir, exist_ok=True)
-
-            # Download GGUF weights
-            try:
-                dl_gguf = hf_hub_download(_GGUF_REPO, remote_gguf, local_dir=ckpts_dir)
-            except Exception:
-                print(f"[Trellis2-models]   Quant not found, trying generic GGUF...", file=sys.stderr)
-                dl_gguf = hf_hub_download(_GGUF_REPO, remote_gguf_plain, local_dir=ckpts_dir)
-                model_file_quant = f"{path}.gguf"   # update target
-
-            # Flatten: hf_hub places in subfolder matching repo path (e.g. shape/file.gguf)
-            if os.path.abspath(dl_gguf) != os.path.abspath(model_file_quant):
-                import shutil
-                shutil.move(dl_gguf, model_file_quant)
-            print(f"[Trellis2-models]   ✔ GGUF ready: {model_file_quant}", file=sys.stderr)
-
-            # Download Aero-Ex json (always — its architecture may differ from microsoft)
-            try:
-                dl_json = hf_hub_download(_GGUF_REPO, remote_json, local_dir=ckpts_dir)
-                local_json = f"{path}.json"
-                if os.path.abspath(dl_json) != os.path.abspath(local_json):
-                    import shutil
-                    shutil.move(dl_json, local_json)
-                print(f"[Trellis2-models]   ✔ Config ready: {local_json}", file=sys.stderr)
-            except Exception as je:
-                print(f"[Trellis2-models]   ⚠ Could not get Aero-Ex config ({je}), using local if present", file=sys.stderr)
-
-            # Cleanup any leftover empty repo subdirs
-            for d in ["shape", "texture", "refiner", "decoders", "encoders", "Vision"]:
-                dp = os.path.join(ckpts_dir, d)
-                if os.path.exists(dp):
-                    import shutil as _sh
-                    try: _sh.rmtree(dp)
-                    except: pass
-
-            config_file = f"{path}.json"
-            model_file  = model_file_quant
-            is_gguf = True
-
-        except Exception as _dl_err:
-            print(f"[Trellis2-models]   ✘ Auto-download failed: {_dl_err} — falling back to Safetensors", file=sys.stderr)
-            config_file = f"{path}.json"
-            model_file  = f"{path}.safetensors"
-    elif os.path.exists(f"{path}.json") and os.path.exists(f"{path}.safetensors"):
-        print(f"[Trellis2-models]   ✔ Using Safetensors: {os.path.basename(path)}.safetensors", file=sys.stderr)
-        config_file = f"{path}.json"
-        model_file  = f"{path}.safetensors"
-    else:
-        from huggingface_hub import hf_hub_download
-        path_parts = path.split('/')
-        repo_id = f'{path_parts[0]}/{path_parts[1]}'
-        model_name = '/'.join(path_parts[2:])
-        config_file = hf_hub_download(repo_id, f"{model_name}.json")
-        model_file  = hf_hub_download(repo_id, f"{model_name}.safetensors")
-
+    # ── Load checkpoint ───────────────────────────────────────────────────
     with open(config_file, 'r') as f:
         config = json.load(f)
 
@@ -299,7 +250,12 @@ def from_pretrained(path: str, enable_gguf: bool = False, gguf_quant: str = "Q8_
     if not is_gguf:
         # Reload directly to CUDA for FP16 models (avoids CPU overhead)
         device = "cuda:0" if torch.cuda.is_available() else "cpu"
-        model.load_state_dict(load_file(model_file, device=device), strict=False)
+        try:
+            sd_loaded = load_file(model_file, device=device)
+            model.load_state_dict(sd_loaded, strict=False)
+        except Exception as e:
+            print(f"[Trellis2-models] Fast load failed ({e}), using CPU fallback", file=sys.stderr)
+            model.load_state_dict(load_file(model_file), strict=False)
 
     return model
 

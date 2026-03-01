@@ -87,7 +87,7 @@
     },
     {
       "id": 2,
-      "type": "Trellis2LoadModel",
+      "type": "Trellis2LoadModel_GGUF",
       "pos": [
         264.5598759967819,
         993.6174889527508
@@ -110,9 +110,9 @@
         }
       ],
       "properties": {
-        "aux_id": "visualbruno/ComfyUI-Trellis2",
+        "aux_id": "aeroex/ComfyUI-Trellis2-GGUF",
         "ver": "c5d66aa46bf1bbf903fd4fe9ff086ac774bb7e03",
-        "Node name for S&R": "Trellis2LoadModel",
+        "Node name for S&R": "Trellis2LoadModel_GGUF",
         "widget_ue_connectable": {}
       },
       "widgets_values": [
@@ -125,7 +125,7 @@
     },
     {
       "id": 18,
-      "type": "Trellis2PreProcessImage",
+      "type": "Trellis2PreProcessImage_GGUF",
       "pos": [
         263.0397099736384,
         1453.040730438439
@@ -156,9 +156,9 @@
         }
       ],
       "properties": {
-        "aux_id": "visualbruno/ComfyUI-Trellis2",
+        "aux_id": "aeroex/ComfyUI-Trellis2-GGUF",
         "ver": "15854282a73cf231b81d52ada22e652f414a078b",
-        "Node name for S&R": "Trellis2PreProcessImage",
+        "Node name for S&R": "Trellis2PreProcessImage_GGUF",
         "widget_ue_connectable": {}
       },
       "widgets_values": [
@@ -168,7 +168,7 @@
     },
     {
       "id": 1,
-      "type": "Trellis2LoadImageWithTransparency",
+      "type": "Trellis2LoadImageWithTransparency_GGUF",
       "pos": [
         -293.9350983507024,
         1366.6009200665326
@@ -201,9 +201,9 @@
         }
       ],
       "properties": {
-        "aux_id": "visualbruno/ComfyUI-Trellis2",
+        "aux_id": "aeroex/ComfyUI-Trellis2-GGUF",
         "ver": "e7f9b30df7a09bcedf1c955e176754c73f983254",
-        "Node name for S&R": "Trellis2LoadImageWithTransparency",
+        "Node name for S&R": "Trellis2LoadImageWithTransparency_GGUF",
         "widget_ue_connectable": {}
       },
       "widgets_values": [
@@ -213,7 +213,7 @@
     },
     {
       "id": 21,
-      "type": "Trellis2LoadImageWithTransparency",
+      "type": "Trellis2LoadImageWithTransparency_GGUF",
       "pos": [
         -285.4316533126076,
         2056.8396735019032
@@ -248,9 +248,9 @@
         }
       ],
       "properties": {
-        "aux_id": "visualbruno/ComfyUI-Trellis2",
+        "aux_id": "aeroex/ComfyUI-Trellis2-GGUF",
         "ver": "e7f9b30df7a09bcedf1c955e176754c73f983254",
-        "Node name for S&R": "Trellis2LoadImageWithTransparency",
+        "Node name for S&R": "Trellis2LoadImageWithTransparency_GGUF",
         "widget_ue_connectable": {}
       },
       "widgets_values": [
@@ -260,7 +260,7 @@
     },
     {
       "id": 11,
-      "type": "Trellis2ExportMesh",
+      "type": "Trellis2ExportMesh_GGUF",
       "pos": [
         963.3009624015439,
         1226.3665857311485
@@ -289,9 +289,9 @@
         }
       ],
       "properties": {
-        "aux_id": "visualbruno/ComfyUI-Trellis2",
+        "aux_id": "aeroex/ComfyUI-Trellis2-GGUF",
         "ver": "20651320d20ed56a52168c1bd3f29d6886c4be06",
-        "Node name for S&R": "Trellis2ExportMesh",
+        "Node name for S&R": "Trellis2ExportMesh_GGUF",
         "widget_ue_connectable": {}
       },
       "widgets_values": [
@@ -302,7 +302,7 @@
     },
     {
       "id": 26,
-      "type": "Trellis2PreProcessImage",
+      "type": "Trellis2PreProcessImage_GGUF",
       "pos": [
         273.345930367051,
         1625.0892297322023
@@ -333,9 +333,9 @@
         }
       ],
       "properties": {
-        "aux_id": "visualbruno/ComfyUI-Trellis2",
+        "aux_id": "aeroex/ComfyUI-Trellis2-GGUF",
         "ver": "15854282a73cf231b81d52ada22e652f414a078b",
-        "Node name for S&R": "Trellis2PreProcessImage",
+        "Node name for S&R": "Trellis2PreProcessImage_GGUF",
         "widget_ue_connectable": {}
       },
       "widgets_values": [
@@ -345,7 +345,7 @@
     },
     {
       "id": 8,
-      "type": "Trellis2LoadMesh",
+      "type": "Trellis2LoadMesh_GGUF",
       "pos": [
         -288.7042468259506,
         1215.4568912264674
@@ -368,9 +368,9 @@
         }
       ],
       "properties": {
-        "aux_id": "visualbruno/ComfyUI-Trellis2",
+        "aux_id": "aeroex/ComfyUI-Trellis2-GGUF",
         "ver": "20651320d20ed56a52168c1bd3f29d6886c4be06",
-        "Node name for S&R": "Trellis2LoadMesh",
+        "Node name for S&R": "Trellis2LoadMesh_GGUF",
         "widget_ue_connectable": {}
       },
       "widgets_values": [
@@ -379,7 +379,7 @@
     },
     {
       "id": 37,
-      "type": "Trellis2MeshTexturingMultiView",
+      "type": "Trellis2MeshTexturingMultiView_GGUF",
       "pos": [
         742.5264619145277,
         1433.3435382751823
@@ -446,9 +446,9 @@
         }
       ],
       "properties": {
-        "aux_id": "visualbruno/ComfyUI-Trellis2",
+        "aux_id": "aeroex/ComfyUI-Trellis2-GGUF",
         "ver": "a19110a28a5c5c434386af0421005dd8edae82db",
-        "Node name for S&R": "Trellis2MeshTexturingMultiView",
+        "Node name for S&R": "Trellis2MeshTexturingMultiView_GGUF",
         "widget_ue_connectable": {}
       },
       "widgets_values": [
