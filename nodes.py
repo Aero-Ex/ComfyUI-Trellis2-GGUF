@@ -1846,7 +1846,7 @@ class Trellis2_GGUFPostProcessAndUnWrapAndRasterizer:
                 uv_unwrap_method = "Xatlas"
             else:
                 out_vertices = torch.from_numpy(new_verts).cuda().float()
-                out_faces = torch.from_numpy(new_faces).cuda().long()
+                out_faces = torch.from_numpy(new_faces).cuda().int()
                 out_uvs = torch.from_numpy(new_uvs).cuda().float()
                 out_vmaps = torch.from_numpy(vmap).cuda().long()
                 
@@ -1866,7 +1866,7 @@ class Trellis2_GGUFPostProcessAndUnWrapAndRasterizer:
                 uv_unwrap_method = "Xatlas"
             else:
                 out_vertices = torch.from_numpy(new_verts).cuda().float()
-                out_faces = torch.from_numpy(new_faces).cuda().long()
+                out_faces = torch.from_numpy(new_faces).cuda().int()
                 out_uvs = torch.from_numpy(new_uvs).cuda().float()
                 out_vmaps = torch.from_numpy(vmap).cuda().long()
                 
