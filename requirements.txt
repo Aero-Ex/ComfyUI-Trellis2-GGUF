@@ -7,3 +7,6 @@ scipy
 open3d
 plotly
 rembg
+trimesh
+rectpack
+numpy

@@ -1846,6 +1846,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         double_side_material = True,
         bake_on_vertices = False,
         use_custom_normals = False,
+        uv_unwrap_method = 'Xatlas',
         mesh_cluster_threshold_cone_half_angle_rad = 60.0
     ):        
         vertices = mesh.vertices
@@ -1867,16 +1868,53 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             _cumesh = cumesh.CuMesh()
             _cumesh.init(vertices_torch, faces_torch)
             print('Unwrapping mesh ...')
-            vertices_torch, faces_torch, uvs_torch, vmap = _cumesh.uv_unwrap(
-                compute_charts_kwargs={
-                    "threshold_cone_half_angle_rad": np.radians(mesh_cluster_threshold_cone_half_angle_rad),
-                    "refine_iterations": 0,
-                    "global_iterations": 1,
-                    "smooth_strength": 1,
-                },
-                return_vmaps=True,
-                verbose=True,
-            )
+            
+            if uv_unwrap_method == 'Blender':
+                from ..utils.unwrap_utils import blender_unwrap_glb, check_bpy_available
+                if not check_bpy_available():
+                    print("[Trellis2] WARNING: bpy not installed, falling back to Xatlas.")
+                    uv_unwrap_method = 'Xatlas'
+                    
+            if uv_unwrap_method == 'Blender':
+                _out_verts, _out_faces = _cumesh.read()
+                new_verts, new_faces, new_uvs, vmap_blender = blender_unwrap_glb(_out_verts.cpu().numpy(), _out_faces.cpu().numpy())
+                if new_verts is None:
+                    print("[Trellis2] ERROR: Blender unwrap failed, falling back to Xatlas.")
+                    uv_unwrap_method = 'Xatlas'
+                else:
+                    vertices_torch = torch.from_numpy(new_verts).cuda().float()
+                    faces_torch = torch.from_numpy(new_faces).cuda().int()
+                    uvs_torch = torch.from_numpy(new_uvs).cuda().float()
+                    vmap = torch.from_numpy(vmap_blender).cuda().long()
+                    
+            if uv_unwrap_method == 'Smart':
+                from ..utils.unwrap_utils import python_smart_unwrap_glb
+                _out_verts, _out_faces = _cumesh.read()
+                new_verts, new_faces, new_uvs, vmap_blender = python_smart_unwrap_glb(
+                    _out_verts.cpu().numpy(), 
+                    _out_faces.cpu().numpy(),
+                    angle_limit=np.radians(mesh_cluster_threshold_cone_half_angle_rad)
+                )
+                if new_verts is None:
+                    print("[Trellis2] ERROR: Smart unwrap failed, falling back to Xatlas.")
+                    uv_unwrap_method = 'Xatlas'
+                else:
+                    vertices_torch = torch.from_numpy(new_verts).cuda().float()
+                    faces_torch = torch.from_numpy(new_faces).cuda().int()
+                    uvs_torch = torch.from_numpy(new_uvs).cuda().float()
+                    vmap = torch.from_numpy(vmap_blender).cuda().long()
+                    
+            if uv_unwrap_method == 'Xatlas':
+                vertices_torch, faces_torch, uvs_torch, vmap = _cumesh.uv_unwrap(
+                    compute_charts_kwargs={
+                        "threshold_cone_half_angle_rad": np.radians(mesh_cluster_threshold_cone_half_angle_rad),
+                        "refine_iterations": 0,
+                        "global_iterations": 1,
+                        "smooth_strength": 1,
+                    },
+                    return_vmaps=True,
+                    verbose=True,
+                )
             
             del _cumesh
             gc.collect()      
@@ -2085,6 +2123,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         max_views = 4,
         bake_on_vertices = False,
         use_custom_normals = False,
+        uv_unwrap_method: str = 'Xatlas',
         mesh_cluster_threshold_cone_half_angle_rad=60.0,
         use_tiled_encoder: bool = False,
         encoder_tile_size: int = 512,
@@ -2154,7 +2193,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         pbr_voxel = self.decode_tex_slat(tex_slat)
         torch.cuda.empty_cache()
         
-        out_mesh, baseColorTexture, metallicRoughnessTexture = self.postprocess_mesh(mesh, pbr_voxel, resolution, texture_size, texture_alpha_mode, double_side_material, bake_on_vertices, use_custom_normals, mesh_cluster_threshold_cone_half_angle_rad)
+        out_mesh, baseColorTexture, metallicRoughnessTexture = self.postprocess_mesh(mesh, pbr_voxel, resolution, texture_size, texture_alpha_mode, double_side_material, bake_on_vertices, use_custom_normals, uv_unwrap_method, mesh_cluster_threshold_cone_half_angle_rad)
         return out_mesh, baseColorTexture, metallicRoughnessTexture
         
     @torch.no_grad()
@@ -2173,6 +2212,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         double_side_material = True,
         bake_on_vertices = False,
         use_custom_normals = False,
+        uv_unwrap_method: str = 'Xatlas',
         mesh_cluster_threshold_cone_half_angle_rad=60.0,
         front_axis: str = 'z',
         blend_temperature: float = 2.0,
@@ -2263,7 +2303,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         pbr_voxel = self.decode_tex_slat(tex_slat)
         torch.cuda.empty_cache()
         
-        out_mesh, baseColorTexture, metallicRoughnessTexture = self.postprocess_mesh(mesh, pbr_voxel, resolution, texture_size, texture_alpha_mode, double_side_material, bake_on_vertices, use_custom_normals, mesh_cluster_threshold_cone_half_angle_rad)
+        out_mesh, baseColorTexture, metallicRoughnessTexture = self.postprocess_mesh(mesh, pbr_voxel, resolution, texture_size, texture_alpha_mode, double_side_material, bake_on_vertices, use_custom_normals, uv_unwrap_method, mesh_cluster_threshold_cone_half_angle_rad)
         return out_mesh, baseColorTexture, metallicRoughnessTexture        
     
     def get_coords_from_trimesh(self, mesh, resolution):

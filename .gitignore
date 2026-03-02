@@ -10,3 +10,5 @@ o-voxel/*
 nvdiffrast/*
 nvdiffrec/*
 venv/
+test_*.py
+debug_*.py

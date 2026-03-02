@@ -977,6 +977,7 @@ class Trellis2_GGUFUnWrapAndRasterizer:
                 "double_side_material": ("BOOLEAN",{"default":False}),
                 "bake_on_vertices": ("BOOLEAN",{"default":False}),
                 "use_custom_normals": ("BOOLEAN",{"default":False}),
+                "uv_unwrap_method": (["Xatlas", "Blender", "Smart"],{"default":"Xatlas"}),
                 "bvh": ("BVH",),                
             }
         }
@@ -987,7 +988,7 @@ class Trellis2_GGUFUnWrapAndRasterizer:
     CATEGORY = "Trellis2Wrapper (GGUF)"
     OUTPUT_NODE = True
 
-    def process(self, mesh, mesh_cluster_threshold_cone_half_angle_rad, mesh_cluster_refine_iterations, mesh_cluster_global_iterations, mesh_cluster_smooth_strength, texture_size, texture_alpha_mode, double_side_material, bake_on_vertices,use_custom_normals,bvh):
+    def process(self, mesh, mesh_cluster_threshold_cone_half_angle_rad, mesh_cluster_refine_iterations, mesh_cluster_global_iterations, mesh_cluster_smooth_strength, texture_size, texture_alpha_mode, double_side_material, bake_on_vertices,use_custom_normals,uv_unwrap_method,bvh):
         mesh_copy = copy.deepcopy(mesh)
         
         aabb = [[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]]
@@ -1120,21 +1121,43 @@ class Trellis2_GGUFUnWrapAndRasterizer:
             return (textured_mesh, placeholder_texture, placeholder_texture,)        
         
         print('Unwrapping ...')        
-        out_vertices, out_faces, out_uvs, out_vmaps = cumesh.uv_unwrap(
-            compute_charts_kwargs={
-                "threshold_cone_half_angle_rad": mesh_cluster_threshold_cone_half_angle_rad,
-                "refine_iterations": mesh_cluster_refine_iterations,
-                "global_iterations": mesh_cluster_global_iterations,
-                "smooth_strength": mesh_cluster_smooth_strength,                
-            },
-            return_vmaps=True,
-            verbose=True,
-        )
+        if uv_unwrap_method == "Blender":
+            from .trellis2_gguf.utils.unwrap_utils import blender_unwrap_glb, check_bpy_available
+            if not check_bpy_available():
+                print("[Trellis2] WARNING: bpy not installed, falling back to Xatlas.")
+                uv_unwrap_method = "Xatlas"
         
-        out_vertices = out_vertices.cuda()
-        out_faces = out_faces.cuda()
-        out_uvs = out_uvs.cuda()
-        out_vmaps = out_vmaps.cuda()
+        if uv_unwrap_method == "Blender":
+            _out_verts, _out_faces = cumesh.read()
+            _vert_np = _out_verts.cpu().numpy()
+            _face_np = _out_faces.cpu().numpy()
+            new_verts, new_faces, new_uvs, vmap = blender_unwrap_glb(_vert_np, _face_np)
+            
+            if new_verts is None:
+                print("[Trellis2] ERROR: Blender unwrap failed, falling back to Xatlas.")
+                uv_unwrap_method = "Xatlas"
+            else:
+                out_vertices = torch.from_numpy(new_verts).cuda().float()
+                out_faces = torch.from_numpy(new_faces).cuda().long()
+                out_uvs = torch.from_numpy(new_uvs).cuda().float()
+                out_vmaps = torch.from_numpy(vmap).cuda().long()
+                
+        if uv_unwrap_method == "Xatlas":
+            out_vertices, out_faces, out_uvs, out_vmaps = cumesh.uv_unwrap(
+                compute_charts_kwargs={
+                    "threshold_cone_half_angle_rad": mesh_cluster_threshold_cone_half_angle_rad,
+                    "refine_iterations": mesh_cluster_refine_iterations,
+                    "global_iterations": mesh_cluster_global_iterations,
+                    "smooth_strength": mesh_cluster_smooth_strength,                
+                },
+                return_vmaps=True,
+                verbose=True,
+            )
+            out_vertices = out_vertices.cuda()
+            out_faces = out_faces.cuda()
+            out_uvs = out_uvs.cuda()
+            out_vmaps = out_vmaps.cuda()
+
         cumesh.compute_vertex_normals()
         out_normals = cumesh.read_vertex_normals()[out_vmaps]        
 
@@ -1507,6 +1530,7 @@ class Trellis2_GGUFPostProcessAndUnWrapAndRasterizer:
                 "remove_floaters": ("BOOLEAN",{"default":True}),
                 "bake_on_vertices": ("BOOLEAN",{"default":False}),
                 "use_custom_normals":("BOOLEAN",{"default":False}),
+                "uv_unwrap_method": (["Xatlas", "Blender", "Smart"],{"default":"Xatlas"}),
                 "bvh": ("BVH",),
                 "remove_inner_faces": ("BOOLEAN",{"default":True}),
             }
@@ -1518,7 +1542,7 @@ class Trellis2_GGUFPostProcessAndUnWrapAndRasterizer:
     CATEGORY = "Trellis2Wrapper (GGUF)"
     OUTPUT_NODE = True
 
-    def process(self, mesh, mesh_cluster_threshold_cone_half_angle_rad, mesh_cluster_refine_iterations, mesh_cluster_global_iterations, mesh_cluster_smooth_strength, texture_size, remesh, remesh_band, remesh_project, target_face_num, simplify_method, fill_holes, texture_alpha_mode, dual_contouring_resolution, double_side_material, remove_floaters, bake_on_vertices,use_custom_normals,bvh,remove_inner_faces):
+    def process(self, mesh, mesh_cluster_threshold_cone_half_angle_rad, mesh_cluster_refine_iterations, mesh_cluster_global_iterations, mesh_cluster_smooth_strength, texture_size, remesh, remesh_band, remesh_project, target_face_num, simplify_method, fill_holes, texture_alpha_mode, dual_contouring_resolution, double_side_material, remove_floaters, bake_on_vertices,use_custom_normals,uv_unwrap_method,bvh,remove_inner_faces):
         pbar = ProgressBar(5 if not bake_on_vertices else 4)
         mesh_copy = copy.deepcopy(mesh)
         
@@ -1785,22 +1809,44 @@ class Trellis2_GGUFPostProcessAndUnWrapAndRasterizer:
         
         # --- Standard texture baking path ---
         print('Unwrapping ...')        
-        out_vertices, out_faces, out_uvs, out_vmaps = cumesh.uv_unwrap(
-            compute_charts_kwargs={
-                "threshold_cone_half_angle_rad": mesh_cluster_threshold_cone_half_angle_rad,
-                "refine_iterations": mesh_cluster_refine_iterations,
-                "global_iterations": mesh_cluster_global_iterations,
-                "smooth_strength": mesh_cluster_smooth_strength,
-            },
-            return_vmaps=True,
-            verbose=True,
-        )
-        pbar.update(1)
+        if uv_unwrap_method == "Blender":
+            from .trellis2_gguf.utils.unwrap_utils import blender_unwrap_glb, check_bpy_available
+            if not check_bpy_available():
+                print("[Trellis2] WARNING: bpy not installed, falling back to Xatlas.")
+                uv_unwrap_method = "Xatlas"
         
-        out_vertices = out_vertices.cuda()
-        out_faces = out_faces.cuda()
-        out_uvs = out_uvs.cuda()
-        out_vmaps = out_vmaps.cuda()
+        if uv_unwrap_method == "Blender":
+            _out_verts, _out_faces = cumesh.read()
+            _vert_np = _out_verts.cpu().numpy()
+            _face_np = _out_faces.cpu().numpy()
+            new_verts, new_faces, new_uvs, vmap = blender_unwrap_glb(_vert_np, _face_np)
+            
+            if new_verts is None:
+                print("[Trellis2] ERROR: Blender unwrap failed, falling back to Xatlas.")
+                uv_unwrap_method = "Xatlas"
+            else:
+                out_vertices = torch.from_numpy(new_verts).cuda().float()
+                out_faces = torch.from_numpy(new_faces).cuda().long()
+                out_uvs = torch.from_numpy(new_uvs).cuda().float()
+                out_vmaps = torch.from_numpy(vmap).cuda().long()
+                
+        if uv_unwrap_method == "Xatlas":
+            out_vertices, out_faces, out_uvs, out_vmaps = cumesh.uv_unwrap(
+                compute_charts_kwargs={
+                    "threshold_cone_half_angle_rad": mesh_cluster_threshold_cone_half_angle_rad,
+                    "refine_iterations": mesh_cluster_refine_iterations,
+                    "global_iterations": mesh_cluster_global_iterations,
+                    "smooth_strength": mesh_cluster_smooth_strength,                
+                },
+                return_vmaps=True,
+                verbose=True,
+            )
+            out_vertices = out_vertices.cuda()
+            out_faces = out_faces.cuda()
+            out_uvs = out_uvs.cuda()
+            out_vmaps = out_vmaps.cuda()
+
+        pbar.update(1)
         cumesh.compute_vertex_normals()
         out_normals = cumesh.read_vertex_normals()[out_vmaps]        
 
@@ -2149,6 +2195,7 @@ class Trellis2_GGUFMeshTexturing:
                 "max_views": ("INT", {"default": 4, "min": 1, "max": 16}),
                 "bake_on_vertices": ("BOOLEAN",{"default":False}),
                 "use_custom_normals": ("BOOLEAN",{"default":False}),
+                "uv_unwrap_method": (["Xatlas", "Blender", "Smart"],{"default":"Xatlas"}),
                 "mesh_cluster_threshold_cone_half_angle_rad": ("FLOAT",{"default":60.0,"min":0.0,"max":359.9}),
             },
             "optional": {
@@ -2167,7 +2214,7 @@ class Trellis2_GGUFMeshTexturing:
     CATEGORY = "Trellis2Wrapper (GGUF)"
     OUTPUT_NODE = True
 
-    def process(self, pipeline, image, trimesh, seed, texture_steps, texture_guidance_strength, texture_guidance_rescale, texture_rescale_t, resolution, texture_size, texture_alpha_mode, double_side_material, texture_guidance_interval_start, texture_guidance_interval_end, max_views,bake_on_vertices,use_custom_normals,mesh_cluster_threshold_cone_half_angle_rad, use_tiled_encoder=False, encoder_tile_size=512, encoder_overlap=24, use_tiled_decoder_for_texture=False, decoder_tile_size=120, decoder_overlap=48):
+    def process(self, pipeline, image, trimesh, seed, texture_steps, texture_guidance_strength, texture_guidance_rescale, texture_rescale_t, resolution, texture_size, texture_alpha_mode, double_side_material, texture_guidance_interval_start, texture_guidance_interval_end, max_views,bake_on_vertices,use_custom_normals,uv_unwrap_method,mesh_cluster_threshold_cone_half_angle_rad, use_tiled_encoder=False, encoder_tile_size=512, encoder_overlap=24, use_tiled_decoder_for_texture=False, decoder_tile_size=120, decoder_overlap=48):
         images = tensor_batch_to_pil_list(image, max_views=max_views)
         image_in = images[0] if len(images) == 1 else images
 
@@ -2188,6 +2235,7 @@ class Trellis2_GGUFMeshTexturing:
             max_views = max_views,
             bake_on_vertices = bake_on_vertices,
             use_custom_normals = use_custom_normals,
+            uv_unwrap_method = uv_unwrap_method,
             mesh_cluster_threshold_cone_half_angle_rad = mesh_cluster_threshold_cone_half_angle_rad,
             use_tiled_encoder=use_tiled_encoder,
             encoder_tile_size=encoder_tile_size,
@@ -2223,6 +2271,7 @@ class Trellis2_GGUFMeshTexturingMultiView:
                 "texture_guidance_interval_end": ("FLOAT",{"default":0.90,"min":0.00,"max":1.00,"step":0.01}),
                 "bake_on_vertices": ("BOOLEAN",{"default":False}),
                 "use_custom_normals": ("BOOLEAN",{"default":False}),
+                "uv_unwrap_method": (["Xatlas", "Blender", "Smart"],{"default":"Xatlas"}),
                 "mesh_cluster_threshold_cone_half_angle_rad": ("FLOAT",{"default":60.0,"min":0.0,"max":359.9}),
                 "front_axis": (["z", "x"], {"default": "z"}),
                 "blend_temperature": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 10.0, "step": 0.1}),                
@@ -2263,6 +2312,7 @@ class Trellis2_GGUFMeshTexturingMultiView:
         texture_guidance_interval_end, 
         bake_on_vertices,
         use_custom_normals,
+        uv_unwrap_method,
         mesh_cluster_threshold_cone_half_angle_rad,
         front_axis,
         blend_temperature,
@@ -2303,6 +2353,7 @@ class Trellis2_GGUFMeshTexturingMultiView:
             double_side_material = double_side_material,
             bake_on_vertices = bake_on_vertices,
             use_custom_normals = use_custom_normals,
+            uv_unwrap_method = uv_unwrap_method,
             mesh_cluster_threshold_cone_half_angle_rad = mesh_cluster_threshold_cone_half_angle_rad,
             front_axis = front_axis,
             blend_temperature = blend_temperature,

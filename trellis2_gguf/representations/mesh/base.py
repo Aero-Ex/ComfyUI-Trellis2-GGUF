@@ -134,8 +134,6 @@ class Mesh:
 
         del mesh
         gc.collect()
-
-
 class TextureFilterMode:
     CLOSEST = 0
     LINEAR = 1

@@ -184,7 +184,12 @@ def reconstruct_mesh_dc(
         return torch.zeros((0,3), device=device), torch.zeros((0,3), device=device, dtype=torch.int32)
 
     hashmap_vox = _init_hashmap(resolution, 2 * Nvox, device)
-    _C.hashmap_insert_3d_idx_as_val_cuda(*hashmap_vox, torch.cat([torch.zeros_like(coords[:, :1]), coords], dim=1), resolution, resolution, resolution)
+    coords_4d = torch.zeros((coords.shape[0], 4), dtype=coords.dtype, device=device)
+    coords_4d[:, 1:] = coords
+    _C.hashmap_insert_3d_idx_as_val_cuda(*hashmap_vox, coords_4d, resolution, resolution, resolution)
+    del coords_4d
+    torch.cuda.empty_cache()
+
     if verbose:
         pbar_dc.update(1)  # Voxel hashmap
     grid_verts = _C.get_sparse_voxel_grid_active_vertices(*hashmap_vox, coords.contiguous(), resolution, resolution, resolution)
@@ -195,7 +200,12 @@ def reconstruct_mesh_dc(
     if verbose:
         pbar_dc.update(1)  # UDF computation
     hashmap_vert = _init_hashmap(resolution + 1, 2 * grid_verts.shape[0], device)
-    _C.hashmap_insert_3d_idx_as_val_cuda(*hashmap_vert, torch.cat([torch.zeros_like(grid_verts[:, :1]), grid_verts], dim=1), resolution+1, resolution+1, resolution+1)
+    grid_verts_4d = torch.zeros((grid_verts.shape[0], 4), dtype=grid_verts.dtype, device=device)
+    grid_verts_4d[:, 1:] = grid_verts
+    _C.hashmap_insert_3d_idx_as_val_cuda(*hashmap_vert, grid_verts_4d, resolution+1, resolution+1, resolution+1)
+    del grid_verts_4d
+    torch.cuda.empty_cache()
+
     if verbose:
         pbar_dc.update(1)  # Vertex hashmap
     dual_verts, intersected = _C.simple_dual_contour(*hashmap_vert, coords, dist_vert - eps, resolution+1, resolution+1, resolution+1)
@@ -227,10 +237,17 @@ def reconstruct_mesh_dc(
     quad_indices = torch.cat(quad_list, dim=0)
     intersected_dir = torch.cat(dir_list, dim=0).int()
 
-    # Re-indexing (chunked to avoid large temporary flatten() allocation)
+    # Re-indexing
+    # Free intermediate tensors before allocating active mask to avoid OOM
+    del pts_vert, dist_vert, grid_verts, hashmap_vert, non_zero
+    torch.cuda.empty_cache()
+
     active_mask = torch.zeros(Nvox, dtype=torch.bool, device=device)
-    for _ri in range(0, quad_indices.shape[0], chunk_size):
-        active_mask[quad_indices[_ri:_ri + chunk_size].reshape(-1).long()] = True
+    # Mark active indices in chunks to avoid large temporary flatten() allocation
+    _reindex_chunk = 524_288
+    for _ri in range(0, quad_indices.shape[0], _reindex_chunk):
+        active_mask[quad_indices[_ri:_ri + _reindex_chunk].reshape(-1).long()] = True
+
     vert_map = torch.full((Nvox,), -1, dtype=torch.int32, device=device)
     vert_map[active_mask] = torch.arange(active_mask.sum().item(), dtype=torch.int32, device=device)
     dual_verts = dual_verts[active_mask]
@@ -469,13 +486,21 @@ def remesh_narrow_band_dc(
 
     # --- 4. Dual Contouring Kernels ---
     Nvox = coords.shape[0]
-    hashmap_vox = _init_hashmap(resolution, 2 * Nvox, device)
-    _C.hashmap_insert_3d_idx_as_val_cuda(*hashmap_vox, torch.cat([torch.zeros_like(coords[:, :1]), coords], dim=1), resolution, resolution, resolution)
+    coords_4d = torch.zeros((coords.shape[0], 4), dtype=coords.dtype, device=device)
+    coords_4d[:, 1:] = coords
+    _C.hashmap_insert_3d_idx_as_val_cuda(*hashmap_vox, coords_4d, resolution, resolution, resolution)
+    del coords_4d
+    torch.cuda.empty_cache()
+
     grid_verts = _C.get_sparse_voxel_grid_active_vertices(*hashmap_vox, coords.contiguous(), resolution, resolution, resolution)
     pts_vert = (grid_verts.float() / resolution - 0.5) * scale + center
     dist_vert, _, _ = chunked_udf(bvh, pts_vert)
-    hashmap_vert = _init_hashmap(resolution + 1, 2 * grid_verts.shape[0], device)
-    _C.hashmap_insert_3d_idx_as_val_cuda(*hashmap_vert, torch.cat([torch.zeros_like(grid_verts[:, :1]), grid_verts], dim=1), resolution+1, resolution+1, resolution+1)
+    grid_verts_4d = torch.zeros((grid_verts.shape[0], 4), dtype=grid_verts.dtype, device=device)
+    grid_verts_4d[:, 1:] = grid_verts
+    _C.hashmap_insert_3d_idx_as_val_cuda(*hashmap_vert, grid_verts_4d, resolution+1, resolution+1, resolution+1)
+    del grid_verts_4d
+    torch.cuda.empty_cache()
+
     dual_verts, intersected = _C.simple_dual_contour(*hashmap_vert, coords, dist_vert - eps, resolution+1, resolution+1, resolution+1)
 
     # --- 5. Topology (Memory Safe Re-indexing) ---
@@ -495,10 +520,17 @@ def remesh_narrow_band_dc(
     quad_indices = torch.cat(quad_list, dim=0)
     intersected_dir = torch.cat(dir_list, dim=0).int()
 
-    # Re-indexing without torch.unique to save memory (chunked to avoid large flatten())
+    # Re-indexing without torch.unique to save memory
+    # Free intermediate tensors
+    del pts_vert, dist_vert, grid_verts, hashmap_vert, non_zero
+    torch.cuda.empty_cache()
+
     active_mask = torch.zeros(Nvox, dtype=torch.bool, device=device)
-    for _ri in range(0, quad_indices.shape[0], chunk_size):
-        active_mask[quad_indices[_ri:_ri + chunk_size].reshape(-1).long()] = True
+    # Mark active indices in chunks
+    _reindex_chunk = 524_288
+    for _ri in range(0, quad_indices.shape[0], _reindex_chunk):
+        active_mask[quad_indices[_ri:_ri + _reindex_chunk].reshape(-1).long()] = True
+
     vert_map = torch.full((Nvox,), -1, dtype=torch.int32, device=device)
     vert_map[active_mask] = torch.arange(active_mask.sum().item(), dtype=torch.int32, device=device)
     dual_verts = dual_verts[active_mask]
@@ -778,13 +810,18 @@ def remesh_narrow_band_dc_quad(
     # -------------------------------------------------------------------------
     print('Dual Contouring ...')
     Nvox = coords.shape[0]
+    print(f"Number of voxels (Nvox): {Nvox}")
 
     hashmap_vox = _init_hashmap(resolution, 2 * Nvox, device)
+    coords_4d = torch.zeros((coords.shape[0], 4), dtype=coords.dtype, device=device)
+    coords_4d[:, 1:] = coords
     _C.hashmap_insert_3d_idx_as_val_cuda(
         *hashmap_vox,
-        torch.cat([torch.zeros_like(coords[:, :1]), coords], dim=1),
+        coords_4d,
         resolution, resolution, resolution
     )
+    del coords_4d
+    torch.cuda.empty_cache()
 
     grid_verts = _C.get_sparse_voxel_grid_active_vertices(
         *hashmap_vox, coords.contiguous(),
@@ -795,11 +832,15 @@ def remesh_narrow_band_dc_quad(
     dist_vert, _ = chunked_udf(bvh, pts_vert)
 
     hashmap_vert = _init_hashmap(resolution + 1, 2 * grid_verts.shape[0], device)
+    grid_verts_4d = torch.zeros((grid_verts.shape[0], 4), dtype=grid_verts.dtype, device=device)
+    grid_verts_4d[:, 1:] = grid_verts
     _C.hashmap_insert_3d_idx_as_val_cuda(
         *hashmap_vert,
-        torch.cat([torch.zeros_like(grid_verts[:, :1]), grid_verts], dim=1),
+        grid_verts_4d,
         resolution + 1, resolution + 1, resolution + 1
     )
+    del grid_verts_4d
+    torch.cuda.empty_cache()
 
     dual_verts, intersected = _C.simple_dual_contour(
         *hashmap_vert,
@@ -850,11 +891,13 @@ def remesh_narrow_band_dc_quad(
     # Free intermediate tensors before allocating active mask to avoid OOM
     del pts_vert, dist_vert, grid_verts, hashmap_vert, nz
     torch.cuda.empty_cache()
+
     active = torch.zeros(Nvox, dtype=torch.bool, device=device)
-    # Mark active indices in chunks to avoid large temporary flatten() allocation
+    # Mark active indices in chunks
     _reindex_chunk = 524_288
     for _ri in range(0, quad_indices.shape[0], _reindex_chunk):
         active[quad_indices[_ri:_ri + _reindex_chunk].reshape(-1).long()] = True
+    torch.cuda.empty_cache()
 
     vert_map = torch.full((Nvox,), -1, dtype=torch.int32, device=device)
     vert_map[active] = torch.arange(
@@ -897,11 +940,13 @@ def remesh_narrow_band_dc_quad(
         quad_indices = quad_indices[is_outer]
         intersected_dir = intersected_dir[is_outer]
 
-    # Re-index vertices to remove unused ones (chunked to avoid large flatten())
+    # Re-index vertices to remove unused ones
     print('Re-indexing vertices after quad filtering ...')
     used_verts = torch.zeros(mesh_vertices.shape[0], dtype=torch.bool, device=device)
-    for _ri in range(0, quad_indices.shape[0], chunk_size):
-        used_verts[quad_indices[_ri:_ri + chunk_size].reshape(-1)] = True
+    # Mark used vertices in chunks
+    for i in range(0, quad_indices.shape[0], chunk_size):
+        end = min(i + chunk_size, quad_indices.shape[0])
+        used_verts[quad_indices[i:end].reshape(-1).long()] = True
 
     new_vert_idx = torch.full((mesh_vertices.shape[0],), -1, dtype=torch.int32, device=device)
     new_vert_idx[used_verts] = torch.arange(used_verts.sum(), dtype=torch.int32, device=device)
@@ -1080,11 +1125,15 @@ def reconstruct_mesh_dc_quad(
     dist_vert = chunked_udf(bvh, pts_vert)
 
     hashmap_vert = _init_hashmap(resolution + 1, 2 * grid_verts.shape[0], device)
+    grid_verts_4d = torch.zeros((grid_verts.shape[0], 4), dtype=grid_verts.dtype, device=device)
+    grid_verts_4d[:, 1:] = grid_verts
     _C.hashmap_insert_3d_idx_as_val_cuda(
         *hashmap_vert,
-        torch.cat([torch.zeros_like(grid_verts[:, :1]), grid_verts], dim=1),
+        grid_verts_4d,
         resolution + 1, resolution + 1, resolution + 1
     )
+    del grid_verts_4d
+    torch.cuda.empty_cache()
 
     dual_verts, intersected = _C.simple_dual_contour(
         *hashmap_vert,
@@ -1132,9 +1181,6 @@ def reconstruct_mesh_dc_quad(
     # 7. Re-index vertices
     # -------------------------------------------------------------------------
     print('Re-indexing vertices ...')
-    # Free intermediate tensors before allocating active mask to avoid OOM
-    del pts_vert, dist_vert, grid_verts, hashmap_vert, nz
-    torch.cuda.empty_cache()
     active = torch.zeros(Nvox, dtype=torch.bool, device=device)
     # Mark active indices in chunks to avoid large temporary flatten() allocation
     _reindex_chunk = 524_288
@@ -1182,11 +1228,13 @@ def reconstruct_mesh_dc_quad(
         quad_indices = quad_indices[is_outer]
         intersected_dir = intersected_dir[is_outer]
 
-    # Re-index vertices to remove unused ones (chunked to avoid large flatten())
+    # Re-index vertices to remove unused ones
     print('Re-indexing vertices after quad filtering ...')
     used_verts = torch.zeros(mesh_vertices.shape[0], dtype=torch.bool, device=device)
-    for _ri in range(0, quad_indices.shape[0], chunk_size):
-        used_verts[quad_indices[_ri:_ri + chunk_size].reshape(-1)] = True
+    # Mark used vertices in chunks
+    for i in range(0, quad_indices.shape[0], chunk_size):
+        end = min(i + chunk_size, quad_indices.shape[0])
+        used_verts[quad_indices[i:end].reshape(-1).long()] = True
 
     new_vert_idx = torch.full((mesh_vertices.shape[0],), -1, dtype=torch.int32, device=device)
     new_vert_idx[used_verts] = torch.arange(used_verts.sum(), dtype=torch.int32, device=device)
