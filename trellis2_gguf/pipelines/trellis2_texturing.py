@@ -290,7 +290,10 @@ class Trellis2TexturingPipeline(Pipeline):
         pbr_voxel: SparseTensor,
         resolution: int = 1024,
         texture_size: int = 1024,
+        uv_unwrap_method: str = 'Xatlas', # 'Xatlas', 'Blender', 'Smart'
+        mesh_cluster_threshold_cone_half_angle_rad: float = 60.0,
     ) -> trimesh.Trimesh:
+        import gc
         vertices = mesh.vertices
         faces = mesh.faces
         normals = mesh.vertex_normals
@@ -303,7 +306,54 @@ class Trellis2TexturingPipeline(Pipeline):
         else:
             _cumesh = cumesh.CuMesh()
             _cumesh.init(vertices_torch, faces_torch)
-            vertices_torch, faces_torch, uvs_torch, vmap = _cumesh.uv_unwrap(return_vmaps=True)
+            
+            if uv_unwrap_method == 'Blender':
+                from ..utils.unwrap_utils import blender_unwrap_glb, check_bpy_available
+                if not check_bpy_available():
+                    print("[Trellis2-GGUF] WARNING: bpy not installed, falling back to xatlas.")
+                    uv_unwrap_method = 'Xatlas'
+                else:
+                    new_verts, new_faces, new_uvs, vmap_blender = blender_unwrap_glb(vertices, faces)
+                    if new_verts is None:
+                        print("[Trellis2-GGUF] ERROR: Blender unwrap failed, falling back to xatlas.")
+                        uv_unwrap_method = 'Xatlas'
+                    else:
+                        vertices_torch = torch.from_numpy(new_verts).cuda().float()
+                        faces_torch = torch.from_numpy(new_faces).cuda().int()
+                        uvs_torch = torch.from_numpy(new_uvs).cuda().float()
+                        vmap = torch.from_numpy(vmap_blender).cuda().long()
+            
+            if uv_unwrap_method == 'Smart':
+                from ..utils.unwrap_utils import python_smart_unwrap_glb
+                new_verts, new_faces, new_uvs, vmap_blender = python_smart_unwrap_glb(
+                    vertices, 
+                    faces,
+                    angle_limit=np.radians(mesh_cluster_threshold_cone_half_angle_rad)
+                )
+                if new_verts is None:
+                    print("[Trellis2-GGUF] ERROR: Smart unwrap failed, falling back to xatlas.")
+                    uv_unwrap_method = 'Xatlas'
+                else:
+                    vertices_torch = torch.from_numpy(new_verts).cuda().float()
+                    faces_torch = torch.from_numpy(new_faces).cuda().int()
+                    uvs_torch = torch.from_numpy(new_uvs).cuda().float()
+                    vmap = torch.from_numpy(vmap_blender).cuda().long()
+
+            if uv_unwrap_method == 'Xatlas':
+                vertices_torch, faces_torch, uvs_torch, vmap = _cumesh.uv_unwrap(
+                    compute_charts_kwargs={
+                        "threshold_cone_half_angle_rad": np.radians(mesh_cluster_threshold_cone_half_angle_rad),
+                        "refine_iterations": 0,
+                        "global_iterations": 1,
+                        "smooth_strength": 1,
+                    },
+                    return_vmaps=True
+                )
+            
+            del _cumesh
+            gc.collect()
+            torch.cuda.empty_cache()
+
             vertices_torch = vertices_torch.cuda()
             faces_torch = faces_torch.cuda()
             uvs_torch = uvs_torch.cuda()
@@ -381,6 +431,8 @@ class Trellis2TexturingPipeline(Pipeline):
         preprocess_image: bool = True,
         resolution: int = 1024,
         texture_size: int = 2048,
+        uv_unwrap_method: str = 'Xatlas', # 'Xatlas', 'Blender', 'Smart'
+        mesh_cluster_threshold_cone_half_angle_rad: float = 60.0,
     ) -> trimesh.Trimesh:
         """
         Run the pipeline.
@@ -404,5 +456,9 @@ class Trellis2TexturingPipeline(Pipeline):
             shape_slat, tex_slat_sampler_params
         )
         pbr_voxel = self.decode_tex_slat(tex_slat)
-        out_mesh = self.postprocess_mesh(mesh, pbr_voxel, resolution, texture_size)
+        out_mesh = self.postprocess_mesh(
+            mesh, pbr_voxel, resolution, texture_size,
+            uv_unwrap_method=uv_unwrap_method,
+            mesh_cluster_threshold_cone_half_angle_rad=mesh_cluster_threshold_cone_half_angle_rad
+        )
         return out_mesh

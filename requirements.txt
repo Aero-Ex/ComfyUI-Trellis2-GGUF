@@ -10,3 +10,4 @@ rembg
 trimesh
 rectpack
 numpy
+bpy

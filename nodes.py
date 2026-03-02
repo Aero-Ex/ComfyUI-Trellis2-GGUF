@@ -1142,6 +1142,26 @@ class Trellis2_GGUFUnWrapAndRasterizer:
                 out_uvs = torch.from_numpy(new_uvs).cuda().float()
                 out_vmaps = torch.from_numpy(vmap).cuda().long()
                 
+        if uv_unwrap_method == "Smart":
+            from .trellis2_gguf.utils.unwrap_utils import python_smart_unwrap_glb
+            _out_verts, _out_faces = cumesh.read()
+            _vert_np = _out_verts.cpu().numpy()
+            _face_np = _out_faces.cpu().numpy()
+            new_verts, new_faces, new_uvs, vmap = python_smart_unwrap_glb(
+                _vert_np, 
+                _face_np,
+                angle_limit=mesh_cluster_threshold_cone_half_angle_rad
+            )
+            
+            if new_verts is None:
+                print("[Trellis2] ERROR: Smart unwrap failed, falling back to Xatlas.")
+                uv_unwrap_method = "Xatlas"
+            else:
+                out_vertices = torch.from_numpy(new_verts).cuda().float()
+                out_faces = torch.from_numpy(new_faces).cuda().long()
+                out_uvs = torch.from_numpy(new_uvs).cuda().float()
+                out_vmaps = torch.from_numpy(vmap).cuda().long()
+                
         if uv_unwrap_method == "Xatlas":
             out_vertices, out_faces, out_uvs, out_vmaps = cumesh.uv_unwrap(
                 compute_charts_kwargs={
@@ -1829,6 +1849,27 @@ class Trellis2_GGUFPostProcessAndUnWrapAndRasterizer:
                 out_faces = torch.from_numpy(new_faces).cuda().long()
                 out_uvs = torch.from_numpy(new_uvs).cuda().float()
                 out_vmaps = torch.from_numpy(vmap).cuda().long()
+                
+        if uv_unwrap_method == "Smart":
+            from .trellis2_gguf.utils.unwrap_utils import python_smart_unwrap_glb
+            _out_verts, _out_faces = cumesh.read()
+            _vert_np = _out_verts.cpu().numpy()
+            _face_np = _out_faces.cpu().numpy()
+            new_verts, new_faces, new_uvs, vmap = python_smart_unwrap_glb(
+                _vert_np, 
+                _face_np,
+                angle_limit=mesh_cluster_threshold_cone_half_angle_rad
+            )
+            
+            if new_verts is None:
+                print("[Trellis2] ERROR: Smart unwrap failed, falling back to Xatlas.")
+                uv_unwrap_method = "Xatlas"
+            else:
+                out_vertices = torch.from_numpy(new_verts).cuda().float()
+                out_faces = torch.from_numpy(new_faces).cuda().long()
+                out_uvs = torch.from_numpy(new_uvs).cuda().float()
+                out_vmaps = torch.from_numpy(vmap).cuda().long()
+                
                 
         if uv_unwrap_method == "Xatlas":
             out_vertices, out_faces, out_uvs, out_vmaps = cumesh.uv_unwrap(

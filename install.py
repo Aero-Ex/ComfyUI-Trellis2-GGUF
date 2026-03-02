@@ -236,6 +236,15 @@ def install():
     # Apply Patches
     apply_patches(dry_run=args.dry_run)
 
+    # 4. Install Smart-UV-Projection (pure Python, universal wheel)
+    smart_uv_url = "https://github.com/Aero-Ex/Smart-UV-Projection/releases/download/v0.1.0/smart_uv_projection-0.1.0-py3-none-any.whl"
+    print(f"\nInstalling Smart-UV-Projection...")
+    if args.dry_run:
+        print(f"  [Dry Run] Would run: {' '.join(pip_base + ['install', smart_uv_url])}")
+    else:
+        if not run_command(pip_base + ["install", smart_uv_url]):
+            print("Warning: Failed to install Smart-UV-Projection. The 'Smart' UV unwrap method will not be available.")
+
     print("\nInstallation complete!")
 
 if __name__ == "__main__":
