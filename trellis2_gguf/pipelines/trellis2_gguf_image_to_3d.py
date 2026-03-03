@@ -249,7 +249,10 @@ class Trellis2GGUFImageTo3DPipeline(Pipeline):
             self.models['sparse_structure_flow_model'].to(self._device)
         
         if self.models['sparse_structure_decoder'] is None:            
-            self.models['sparse_structure_decoder'] = models.from_pretrained(self._pretrained_args['models']['sparse_structure_decoder'])
+            self.models['sparse_structure_decoder'] = models.from_pretrained(
+                self._pretrained_args['models']['sparse_structure_decoder'],
+                **getattr(self, 'sdnq_kwargs', {})
+            )
             self.models['sparse_structure_decoder'].eval()        
             self.models['sparse_structure_decoder'].to(self._device)
             if hasattr(self.models['sparse_structure_decoder'], 'low_vram'):
@@ -285,7 +288,8 @@ class Trellis2GGUFImageTo3DPipeline(Pipeline):
                 os.path.join(self.path, self._pretrained_args['models']['shape_slat_flow_model_512']),
                 enable_gguf=getattr(self, 'enable_gguf', False),
                 gguf_quant=getattr(self, 'gguf_quant', 'Q8_0'),
-                precision=getattr(self, 'precision', None)
+                precision=getattr(self, 'precision', None),
+                **getattr(self, 'sdnq_kwargs', {})
             )
             self.models['shape_slat_flow_model_512'].eval()
             self.models['shape_slat_flow_model_512'].to(self._device)
@@ -339,7 +343,8 @@ class Trellis2GGUFImageTo3DPipeline(Pipeline):
             print('Loading Shape Slat decoder model ...')
             self.models['shape_slat_decoder'] = models.from_pretrained(
                 os.path.join(self.path, self._pretrained_args['models']['shape_slat_decoder']),
-                precision=getattr(self, 'precision', None)
+                precision=getattr(self, 'precision', None),
+                **getattr(self, 'sdnq_kwargs', {})
             )
             self.models['shape_slat_decoder'].eval()
             # In low_vram mode, keep on CPU until decode_shape_slat moves it to device
@@ -361,7 +366,8 @@ class Trellis2GGUFImageTo3DPipeline(Pipeline):
                 os.path.join(self.path, self._pretrained_args['models']['shape_slat_flow_model_1024']),
                 enable_gguf=getattr(self, 'enable_gguf', False),
                 gguf_quant=getattr(self, 'gguf_quant', 'Q8_0'),
-                precision=getattr(self, 'precision', None)
+                precision=getattr(self, 'precision', None),
+                **getattr(self, 'sdnq_kwargs', {})
             )
             self.models['shape_slat_flow_model_1024'].eval()
             self.models['shape_slat_flow_model_1024'].to(self._device)           
@@ -379,7 +385,8 @@ class Trellis2GGUFImageTo3DPipeline(Pipeline):
                 os.path.join(self.path, self._pretrained_args['models']['tex_slat_flow_model_1024']),
                 enable_gguf=getattr(self, 'enable_gguf', False),
                 gguf_quant=getattr(self, 'gguf_quant', 'Q8_0'),
-                precision=getattr(self, 'precision', None)
+                precision=getattr(self, 'precision', None),
+                **getattr(self, 'sdnq_kwargs', {})
             )
             self.models['tex_slat_flow_model_1024'].eval()
             self.models['tex_slat_flow_model_1024'].to(self._device)                   
@@ -393,7 +400,10 @@ class Trellis2GGUFImageTo3DPipeline(Pipeline):
     def load_shape_slat_encoder(self):        
         if self.models['shape_slat_encoder'] is None:
             print('Loading Shape Slat Encoder model ...')
-            self.models['shape_slat_encoder'] = models.from_pretrained(f"{self.path}/ckpts/shape_enc_next_dc_f16c32_fp16")
+            self.models['shape_slat_encoder'] = models.from_pretrained(
+                f"{self.path}/ckpts/shape_enc_next_dc_f16c32_fp16",
+                **getattr(self, 'sdnq_kwargs', {})
+            )
             self.models['shape_slat_encoder'].eval()
             self.models['shape_slat_encoder'].to(self._device)
             if hasattr(self.models['shape_slat_encoder'], 'low_vram'):

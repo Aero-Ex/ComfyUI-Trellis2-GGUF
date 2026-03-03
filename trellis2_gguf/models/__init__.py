@@ -186,14 +186,16 @@ def from_pretrained(path: str, enable_gguf: bool = False, gguf_quant: str = "Q8_
         gguf_quant = gguf_quant[5:]
 
     precision = kwargs.pop("precision", None)
+    basename = os.path.basename(path)
     if enable_sdnq:
         _sdnq_svd_rank = kwargs.get("sdnq_svd_rank", 64)
         
-        # Robustly replace any variation of ckpts directory with sdnq directory
-        path = path.replace("\\ckpts\\", "\\sdnq\\")
-        path = path.replace("/ckpts/", "/sdnq/")
-        path = path.replace("\\ckpts/", "\\sdnq/")
-        path = path.replace("/ckpts\\", "/sdnq\\")
+        # Robustly replace any variation of model directories with sdnq directory
+        for folder in ["ckpts", "shape", "tex"]:
+            path = path.replace(f"\\{folder}\\", "\\sdnq\\")
+            path = path.replace(f"/{folder}/", "/sdnq/")
+            path = path.replace(f"\\{folder}/", "\\sdnq/")
+            path = path.replace(f"/{folder}\\", "/sdnq\\")
         
         if "sdnq" not in path:
             # If there's no ckpts/ in the path, we need to inject sdnq/ before the basename

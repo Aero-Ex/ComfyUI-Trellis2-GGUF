@@ -101,8 +101,18 @@ def resolve_local_path(basename: str, enable_gguf: bool = False, gguf_quant: str
         enable_gguf = False
         precision = None
 
+    # Normalization for SDNQ: determine true basename and suffix
+    is_sdnq = precision and precision.startswith("sdnq")
+    sdnq_sfx = ""
+    if is_sdnq:
+        rank = precision.replace("sdnq_int8_svd", "")
+        sdnq_sfx = f"_int8_svd{rank}"
+        # Clean current name to avoid double suffix and handle pre-redirected names
+        basename = basename.replace("_bf16", "").replace(sdnq_sfx, "")
+
     # JSON config candidates
-    json_candidates = _candidate_paths(basename, ".json")
+    # For SDNQ, we search for {basename}{sdnq_sfx}.json. For others, just {basename}.json
+    json_candidates = _candidate_paths(basename, f"{sdnq_sfx}.json")
     config_path = next((p for p in json_candidates if os.path.exists(p)), None)
 
     if enable_gguf:
@@ -114,26 +124,21 @@ def resolve_local_path(basename: str, enable_gguf: bool = False, gguf_quant: str
             if config_path is None:
                 config_path = model_path  # json not strictly needed for GGUF
             return config_path, model_path, True
-    elif precision and precision.startswith("sdnq"):
-        # SDNQ candidates
-        # precision is like "sdnq_int8_svd64"
-        rank = precision.replace("sdnq_int8_svd", "")
-        sfx = f"_int8_svd{rank}"
-        basename = basename.replace("_bf16", "")
+
+    elif is_sdnq:
+        # SDNQ candidates (weights)
+        st_candidates = _candidate_paths(basename, f"{sdnq_sfx}.safetensors")
+        # Ensure we check the sdnq/ subfolder explicitly (in case _candidate_paths nested logic missed it)
+        st_candidates.append(os.path.join(get_models_dir(), "sdnq", f"{basename}{sdnq_sfx}.safetensors"))
         
-        # We need config.json, weights.safetensors, and _quantization_config.json
-        # Only check safetensors here to return model_path
-        st_candidates = [
-            os.path.join(get_models_dir(), f"{basename}{sfx}.safetensors"),
-            os.path.join(get_models_dir(), f"sdnq/{basename}{sfx}.safetensors")
-        ]
         model_path = next((p for p in st_candidates if os.path.exists(p)), None)
         if model_path:
-            pass 
+            # For SDNQ, we return regardless of config_path existence, 
+            # though find_json_config/from_pretrained will handle the rest.
+            return config_path, model_path, False
         else:
-            raise FileNotFoundError(f"Model file not found locally for SDNQ: {basename}{sfx}.safetensors")
+            raise FileNotFoundError(f"Model file not found locally for SDNQ: {basename}{sdnq_sfx}.safetensors")
 
-        return config_path, model_path, False
     else:
         # Safetensors candidates: precision-specific first, then plain
         sfx_list = []
@@ -150,7 +155,7 @@ def resolve_local_path(basename: str, enable_gguf: bool = False, gguf_quant: str
 
     raise FileNotFoundError(
         f"Model not found locally: {basename} "
-        f"(gguf={enable_gguf}, quant={gguf_quant}, precision={precision}). "
+        f"(gguf={enable_gguf}, quant={gguf_quant}, precision={precision}, is_sdnq={is_sdnq}). "
         f"Run Trellis2LoadModel first to download all required files."
     )
 
