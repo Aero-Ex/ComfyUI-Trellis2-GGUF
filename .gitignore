@@ -10,3 +10,12 @@ o-voxel/*
 nvdiffrast/*
 nvdiffrec/*
 venv/
+test_*.py
+debug_*.py
+*.bak
+*.tmp
+temp/
+ckpts/
+sdnq/
+models/
+output/
