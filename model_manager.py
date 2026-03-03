@@ -114,6 +114,26 @@ def resolve_local_path(basename: str, enable_gguf: bool = False, gguf_quant: str
             if config_path is None:
                 config_path = model_path  # json not strictly needed for GGUF
             return config_path, model_path, True
+    elif precision and precision.startswith("sdnq"):
+        # SDNQ candidates
+        # precision is like "sdnq_int8_svd64"
+        rank = precision.replace("sdnq_int8_svd", "")
+        sfx = f"_int8_svd{rank}"
+        basename = basename.replace("_bf16", "")
+        
+        # We need config.json, weights.safetensors, and _quantization_config.json
+        # Only check safetensors here to return model_path
+        st_candidates = [
+            os.path.join(get_models_dir(), f"{basename}{sfx}.safetensors"),
+            os.path.join(get_models_dir(), f"sdnq/{basename}{sfx}.safetensors")
+        ]
+        model_path = next((p for p in st_candidates if os.path.exists(p)), None)
+        if model_path:
+            pass 
+        else:
+            raise FileNotFoundError(f"Model file not found locally for SDNQ: {basename}{sfx}.safetensors")
+
+        return config_path, model_path, False
     else:
         # Safetensors candidates: precision-specific first, then plain
         sfx_list = []
@@ -133,6 +153,7 @@ def resolve_local_path(basename: str, enable_gguf: bool = False, gguf_quant: str
         f"(gguf={enable_gguf}, quant={gguf_quant}, precision={precision}). "
         f"Run Trellis2LoadModel first to download all required files."
     )
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -161,8 +182,13 @@ def ensure_model_files(
 
     enable_gguf = model_format.startswith("GGUF")
     gguf_quant = model_format.split(" ")[1] if enable_gguf else "Q8_0"
+    enable_sdnq = model_format.startswith("sdnq")
+    sdnq_svd_rank = 64 if "svd64" in model_format else 32
+
     precision = None
-    if "(BF16)" in model_format:
+    if enable_sdnq:
+        precision = f"sdnq_int8_svd{sdnq_svd_rank}"
+    elif "(BF16)" in model_format:
         precision = "bf16"
     elif "(FP8)" in model_format:
         precision = "fp8"
@@ -210,23 +236,43 @@ def ensure_model_files(
             suffixes = [".json", ".safetensors"]
             use_gguf = False
             prec = None
+            use_sdnq = False
+        elif enable_sdnq:
+            basename = basename.replace("_bf16", "")
+            sfx = f"_int8_svd{sdnq_svd_rank}"
+            suffixes = [
+                f"{sfx}.json",
+                f"{sfx}.safetensors",
+                f"{sfx}_quantization_config.json"
+            ]
+            use_gguf = False
+            prec = precision
+            use_sdnq = True
         elif enable_gguf:
             suffixes = [".json", f"_{gguf_quant}.gguf"]
             use_gguf = True
             prec = None
+            use_sdnq = False
         else:
             sfx = f"_{precision}.safetensors" if precision else ".safetensors"
             suffixes = [".json", sfx]
             use_gguf = False
             prec = precision
+            use_sdnq = False
 
         for sfx in suffixes:
-            candidates = _candidate_paths(basename, sfx)
+            if use_sdnq:
+                hf_filename = f"sdnq/{basename}{sfx}"
+                local_cand = os.path.join(root, hf_filename)
+                candidates = [local_cand, os.path.join(root, f"{basename}{sfx}")]
+            else:
+                hf_filename = remote_path(basename, sfx)
+                candidates = _candidate_paths(basename, sfx)
+
             if any(os.path.exists(c) for c in candidates):
                 continue  # already present
 
             # Need to download
-            hf_filename = remote_path(basename, sfx)
             print(f"[ModelManager] Downloading {hf_filename}...")
             try:
                 hf_hub_download(repo_id=GGUF_REPO, filename=hf_filename, local_dir=root)
