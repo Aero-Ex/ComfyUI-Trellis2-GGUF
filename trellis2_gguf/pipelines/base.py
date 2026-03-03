@@ -19,9 +19,8 @@ def _find_sdnq_model_dir(model_path: str, svd_rank: int = 32):
     models_base = os.path.normpath(models_base)
 
     model_basename = os.path.basename(model_path)
-    base, _ = os.path.splitext(model_basename)
     # e.g. ss_flow_img_dit_1_3B_64_bf16 → ss_flow_img_dit_1_3B_64_int8_svd{svd_rank}
-    sdnq_name = base.replace(\"_bf16\", f\"_int8_svd{svd_rank}\")
+    sdnq_name = model_basename.replace("_bf16", f"_int8_svd{svd_rank}")
 
     for case in ["Trellis2", "trellis2", "TRELLIS2"]:
         sdnq_dir = os.path.join(models_base, case, "sdnq")

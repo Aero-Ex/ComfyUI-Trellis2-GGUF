@@ -1230,6 +1230,9 @@ class Trellis2_GGUFUnWrapAndRasterizer:
         cumesh.compute_vertex_normals()
         out_normals = cumesh.read_vertex_normals()[out_vmaps]        
 
+        # nvdiffrast requires int32 for tri/faces
+        out_faces_int32 = out_faces.to(torch.int32)
+
         print("Sampling attributes...")
         # Setup differentiable rasterizer context
         ctx = dr.RasterizeCudaContext()
@@ -1238,9 +1241,9 @@ class Trellis2_GGUFUnWrapAndRasterizer:
         rast = torch.zeros((1, texture_size, texture_size, 4), device='cuda', dtype=torch.float32)
         
         # Rasterize in chunks to save memory
-        for i in range(0, out_faces.shape[0], 100000):
+        for i in range(0, out_faces_int32.shape[0], 100000):
             rast_chunk, _ = dr.rasterize(
-                ctx, uvs_rast, out_faces[i:i+100000],
+                ctx, uvs_rast, out_faces_int32[i:i+100000],
                 resolution=[texture_size, texture_size],
             )
             mask_chunk = rast_chunk[..., 3:4] > 0
@@ -1251,7 +1254,7 @@ class Trellis2_GGUFUnWrapAndRasterizer:
         mask = rast[0, ..., 3] > 0
         
         # Interpolate 3D positions in UV space (finding 3D coord for every texel)
-        pos = dr.interpolate(out_vertices.unsqueeze(0), rast, out_faces)[0][0]
+        pos = dr.interpolate(out_vertices.unsqueeze(0), rast, out_faces_int32)[0][0]
         valid_pos = pos[mask]
         
         # Map these positions back to the *original* high-res mesh to get accurate attributes
@@ -1948,9 +1951,9 @@ class Trellis2_GGUFPostProcessAndUnWrapAndRasterizer:
         rast = torch.zeros((1, texture_size, texture_size, 4), device='cuda', dtype=torch.float32)
         
         # Rasterize in chunks to save memory
-        for i in range(0, out_faces.shape[0], 100000):
+        for i in range(0, out_faces_int32.shape[0], 100000):
             rast_chunk, _ = dr.rasterize(
-                ctx, uvs_rast, out_faces[i:i+100000],
+                ctx, uvs_rast, out_faces_int32[i:i+100000],
                 resolution=[texture_size, texture_size],
             )
             mask_chunk = rast_chunk[..., 3:4] > 0
@@ -1961,7 +1964,7 @@ class Trellis2_GGUFPostProcessAndUnWrapAndRasterizer:
         mask = rast[0, ..., 3] > 0
         
         # Interpolate 3D positions in UV space (finding 3D coord for every texel)
-        pos = dr.interpolate(out_vertices.unsqueeze(0), rast, out_faces)[0][0]
+        pos = dr.interpolate(out_vertices.unsqueeze(0), rast, out_faces_int32)[0][0]
         valid_pos = pos[mask]
         
         # Map these positions back to the *original* high-res mesh to get accurate attributes
