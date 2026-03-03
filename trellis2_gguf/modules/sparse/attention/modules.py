@@ -85,16 +85,23 @@ class SparseMultiHeadAttention(nn.Module):
     def _reshape_chs(x: Union[VarLenTensor, torch.Tensor], shape: Tuple[int, ...]) -> Union[VarLenTensor, torch.Tensor]:
         if isinstance(x, VarLenTensor):
             return x.reshape(*shape)
+        elif hasattr(x, 'feats'):
+            # SparseTensor: reshape prepends N automatically, pass dims directly.
+            return x.reshape(*shape)
         else:
             return x.reshape(*x.shape[:2], *shape)
 
     def _fused_pre(self, x: Union[VarLenTensor, torch.Tensor], num_fused: int) -> Union[VarLenTensor, torch.Tensor]:
         if isinstance(x, VarLenTensor):
             x_feats = x.feats.unsqueeze(0)
+            x_feats = x_feats.reshape(*x_feats.shape[:2], num_fused, self.num_heads, -1)
+            return x.replace(x_feats.squeeze(0))
+        elif hasattr(x, 'feats'):
+            # SparseTensor (detected by .feats attribute to avoid dual-import isinstance failures).
+            # SparseTensor.reshape(a, b, c) → feats.reshape(N, a, b, c), so pass dims directly.
+            return x.reshape(num_fused, self.num_heads, -1)
         else:
-            x_feats = x
-        x_feats = x_feats.reshape(*x_feats.shape[:2], num_fused, self.num_heads, -1)
-        return x.replace(x_feats.squeeze(0)) if isinstance(x, VarLenTensor) else x_feats
+            return x.reshape(*x.shape[:2], num_fused, self.num_heads, -1)
     
     def forward(self, x: SparseTensor, context: Optional[Union[VarLenTensor, torch.Tensor]] = None) -> SparseTensor:
         if self._type == "self":

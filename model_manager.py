@@ -21,6 +21,7 @@ import folder_paths
 # ─────────────────────────────────────────────────────────────────────────────
 GGUF_REPO   = "Aero-Ex/Trellis2-GGUF"
 DINOV3_REPO = "Aero-Ex/Dinov3"
+SDNQ_REPO   = "Aero-Ex/Trellis2-SDNQ"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Aero-Ex/Trellis2-GGUF subfolder map  (basename prefix → HF subfolder)
@@ -139,6 +140,10 @@ def resolve_local_path(basename: str, enable_gguf: bool = False, gguf_quant: str
 # Downloader  (called ONLY from Trellis2LoadModel.process in nodes.py)
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Downloader  (called ONLY from Trellis2LoadModel.process in nodes.py)
+# ─────────────────────────────────────────────────────────────────────────────
+
 def ensure_model_files(
     model_format: str,
     pipeline_config: dict,
@@ -148,7 +153,7 @@ def ensure_model_files(
     Called once during Trellis2LoadModel.process.
 
     Args:
-        model_format: e.g. "GGUF Q6_K", "Safetensors (BF16)", "Safetensors (FP8)"
+        model_format: e.g. "GGUF Q6_K", "Safetensors (BF16)", "sdnq_uint4_svd64"
         pipeline_config: parsed pipeline.json dict
 
     Returns:
@@ -160,6 +165,8 @@ def ensure_model_files(
     os.makedirs(root, exist_ok=True)
 
     enable_gguf = model_format.startswith("GGUF")
+    enable_sdnq = model_format.startswith("sdnq")
+    
     gguf_quant = model_format.split(" ")[1] if enable_gguf else "Q8_0"
     precision = None
     if "(BF16)" in model_format:
@@ -204,6 +211,44 @@ def ensure_model_files(
         basename = rel_path.split("/")[-1]
         enc_dec = is_enc_dec(basename)
 
+        # ── SDNQ Download Logic ──────────────────────────────────────────
+        if enable_sdnq and not enc_dec:
+            # SDNQ files go into models/Trellis2/sdnq/
+            sdnq_dir = os.path.join(root, "sdnq")
+            os.makedirs(sdnq_dir, exist_ok=True)
+            
+            # Map name: 'ss_flow_img_dit_1_3B_64_bf16' -> 'ss_flow_img_dit_1_3B_64_uint4_svd64'
+            # Note: The model_format might be 'sdnq_uint4_svd64'
+            suffix_to_add = model_format.replace("sdnq_", "")  # 'uint4_svd64'
+            
+            # Usually base name ends with _bf16, _fp16, or similar
+            base = basename
+            for p in ["_bf16", "_fp16", "_fp8"]:
+                if base.endswith(p):
+                    base = base[:len(base)-len(p)]
+                    break
+            
+            sdnq_basename = f"{base}_{suffix_to_add}"
+            
+            # Each SDNQ component needs 3 files
+            sdnq_suffixes = [".json", ".safetensors", "_quantization_config.json"]
+            for sfx in sdnq_suffixes:
+                fn = sdnq_basename + sfx
+                local_f = os.path.join(sdnq_dir, fn)
+                if not os.path.exists(local_f):
+                    print(f"[ModelManager] Downloading SDNQ file {fn} from {SDNQ_REPO}...")
+                    try:
+                        hf_hub_download(repo_id=SDNQ_REPO, filename=fn, local_dir=sdnq_dir)
+                    except Exception as e:
+                        print(f"[ModelManager] ⚠ Failed to download SDNQ {fn}: {e}")
+            
+            # For SDNQ, we don't 'resolve_local_path' the usual way as it expects 
+            # safetensors in root or nested folders, whereas SDNQ is in sdnq/ folder.
+            # But the pipeline's from_pretrained will handle this by taking 'path' = root/sdnq/name
+            resolved[key] = os.path.join(sdnq_dir, sdnq_basename)
+            continue
+
+        # ── Regular GGUF / Safetensors Download Logic ─────────────────────
         # Determine suffixes to fetch
         if enc_dec:
             # enc/dec: always plain safetensors (fp16 in name already)
@@ -227,7 +272,7 @@ def ensure_model_files(
 
             # Need to download
             hf_filename = remote_path(basename, sfx)
-            print(f"[ModelManager] Downloading {hf_filename}...")
+            print(f"[ModelManager] Downloading {hf_filename} from {GGUF_REPO}...")
             try:
                 hf_hub_download(repo_id=GGUF_REPO, filename=hf_filename, local_dir=root)
             except Exception as e:

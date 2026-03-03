@@ -4,6 +4,36 @@ import torch.nn as nn
 from .. import models
 
 
+def _find_sdnq_model_dir(model_path: str, svd_rank: int = 32):
+    """
+    Given a standard model path (e.g. .../ckpts/ss_flow_img_dit_1_3B_64_bf16),
+    locate the equivalent SDNQ directory (e.g. .../Trellis2/sdnq/ss_flow_img_dit_1_3B_64_uint4_svd32/).
+    Returns the SDNQ directory path if found, else None.
+    """
+    import os
+    try:
+        import folder_paths
+        models_base = folder_paths.models_dir
+    except ImportError:
+        models_base = os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "models")
+    models_base = os.path.normpath(models_base)
+
+    model_basename = os.path.basename(model_path)
+    # e.g. ss_flow_img_dit_1_3B_64_bf16 → ss_flow_img_dit_1_3B_64_uint4_svd32
+    sdnq_name = model_basename.replace("_bf16", f"_uint4_svd{svd_rank}")
+
+    for case in ["Trellis2", "trellis2", "TRELLIS2"]:
+        sdnq_dir = os.path.join(models_base, case, "sdnq")
+        candidate = os.path.join(sdnq_dir, sdnq_name)
+        # Flat layout: sdnq/{name}_quantization_config.json
+        if os.path.isfile(candidate + "_quantization_config.json"):
+            return candidate
+        # Legacy subdir layout: sdnq/{name}/quantization_config.json
+        if os.path.isdir(candidate) and os.path.exists(os.path.join(candidate, "quantization_config.json")):
+            return candidate
+    return None
+
+
 class Pipeline:
     """
     A base class for pipelines.

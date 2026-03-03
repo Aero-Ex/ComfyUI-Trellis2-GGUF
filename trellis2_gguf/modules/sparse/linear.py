@@ -47,6 +47,13 @@ class SparseLinear(GGMLLayer, nn.Linear):
         return super(nn.Linear, self).forward(x)  # nn.Linear.forward
 
     def forward(self, input: VarLenTensor) -> VarLenTensor:
+        # Handle plain tensors (e.g. when used as nn.Linear in older cached models)
+        if not hasattr(input, 'feats'):
+            x = input.to(self.weight.dtype)
+            if self.is_ggml_quantized():
+                weight, bias = self.cast_bias_weight(x)
+                return F.linear(x, weight, bias)
+            return super(GGMLLayer, self).forward(x)
         if self.is_ggml_quantized():
             # GGUF path: dequantize weights then run linear on raw feats
             weight, bias = self.cast_bias_weight(input.feats)

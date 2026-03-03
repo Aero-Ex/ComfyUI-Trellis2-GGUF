@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 from PIL import Image
-from .base import Pipeline
+from .base import Pipeline, _find_sdnq_model_dir
 from . import samplers, rembg
 from ..modules.sparse import SparseTensor
 from ..modules import image_feature_extractor
@@ -145,9 +145,23 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             self.rembg_model.cpu()
         self._cleanup_cuda()
 
+    def _sdnq_remap(self, path: str) -> str:
+        """Remap a bf16 model path to its SDNQ directory if enable_sdnq is set."""
+        if not getattr(self, 'enable_sdnq', False):
+            return path
+        sdnq_dir = _find_sdnq_model_dir(path, svd_rank=getattr(self, 'sdnq_svd_rank', 32))
+        if sdnq_dir:
+            print(f'[Trellis2-SDNQ] {os.path.basename(path)} → SDNQ: {os.path.basename(sdnq_dir)}')
+            return sdnq_dir
+        print(f'[Trellis2-SDNQ] WARNING: No SDNQ dir for {os.path.basename(path)}, using original')
+        return path
+
     @classmethod
     def from_pretrained(cls, path: str, config_file: str = "pipeline.json", keep_models_loaded = True,
-                        enable_gguf: bool = False, gguf_quant: str = "Q8_0", precision: str = None) -> "Trellis2ImageTo3DPipeline":
+                        enable_gguf: bool = False, gguf_quant: str = "Q8_0", precision: str = None,
+                        enable_sdnq: bool = False, sdnq_use_quantized_matmul: bool = True,
+                        sdnq_torch_compile: bool = False,
+                        sdnq_svd_rank: int = 32) -> "Trellis2ImageTo3DPipeline":
         """
         Load a pretrained model.
 
@@ -190,7 +204,11 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         pipeline.enable_gguf = enable_gguf
         pipeline.gguf_quant = gguf_quant
         pipeline.precision = precision
-        
+        pipeline.enable_sdnq = enable_sdnq
+        pipeline.sdnq_use_quantized_matmul = sdnq_use_quantized_matmul
+        pipeline.sdnq_torch_compile = sdnq_torch_compile
+        pipeline.sdnq_svd_rank = sdnq_svd_rank
+
         pipeline._pretrained_args['models']['sparse_structure_decoder'] = os.path.join(folder_paths.models_dir,"Trellis2","decoders","Stage1","ss_dec_conv3d_16l8_fp16")
         # Check both the new consolidated location and the old legacy location for DINOv3
         dinov3_new = os.path.join(folder_paths.models_dir,"Trellis2","dinov3","facebook","dinov3-vitl16-pretrain-lvd1689m")
@@ -203,11 +221,15 @@ class Trellis2ImageTo3DPipeline(Pipeline):
     def load_sparse_structure_model(self):        
         if self.models['sparse_structure_flow_model'] is None:
             print('Loading Sparse Structure model ...')
+            _path = self._sdnq_remap(os.path.join(self.path, self._pretrained_args['models']['sparse_structure_flow_model']))
             self.models['sparse_structure_flow_model'] = models.from_pretrained(
-                os.path.join(self.path, self._pretrained_args['models']['sparse_structure_flow_model']),
+                _path,
                 enable_gguf=getattr(self, 'enable_gguf', False),
                 gguf_quant=getattr(self, 'gguf_quant', 'Q8_0'),
-                precision=getattr(self, 'precision', None)
+                precision=getattr(self, 'precision', None),
+                enable_sdnq=getattr(self, 'enable_sdnq', False),
+                sdnq_use_quantized_matmul=getattr(self, 'sdnq_use_quantized_matmul', True),
+                sdnq_torch_compile=getattr(self, 'sdnq_torch_compile', False),
             )
             self.models['sparse_structure_flow_model'].eval()
             self.models['sparse_structure_flow_model'].to(self._device)
@@ -220,11 +242,11 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 self.models['sparse_structure_decoder'].low_vram = self.low_vram
     
     def unload_sparse_structure_model(self):
-        if self.models['sparse_structure_flow_model']:
+        if self.models['sparse_structure_flow_model'] is not None:
             del self.models['sparse_structure_flow_model']
             self.models['sparse_structure_flow_model'] = None            
             
-        if self.models['sparse_structure_decoder']:
+        if self.models['sparse_structure_decoder'] is not None:
             del self.models['sparse_structure_decoder']
             self.models['sparse_structure_decoder'] = None
         
@@ -245,11 +267,15 @@ class Trellis2ImageTo3DPipeline(Pipeline):
     def load_shape_slat_flow_model_512(self):        
         if self.models['shape_slat_flow_model_512'] is None:
             print('Loading Shape Slat Flow 512 model ...')
+            _path = self._sdnq_remap(os.path.join(self.path, self._pretrained_args['models']['shape_slat_flow_model_512']))
             self.models['shape_slat_flow_model_512'] = models.from_pretrained(
-                os.path.join(self.path, self._pretrained_args['models']['shape_slat_flow_model_512']),
+                _path,
                 enable_gguf=getattr(self, 'enable_gguf', False),
                 gguf_quant=getattr(self, 'gguf_quant', 'Q8_0'),
-                precision=getattr(self, 'precision', None)
+                precision=getattr(self, 'precision', None),
+                enable_sdnq=getattr(self, 'enable_sdnq', False),
+                sdnq_use_quantized_matmul=getattr(self, 'sdnq_use_quantized_matmul', True),
+                sdnq_torch_compile=getattr(self, 'sdnq_torch_compile', False),
             )
             self.models['shape_slat_flow_model_512'].eval()
             self.models['shape_slat_flow_model_512'].to(self._device)
@@ -263,11 +289,15 @@ class Trellis2ImageTo3DPipeline(Pipeline):
     def load_tex_slat_flow_model_512(self):        
         if self.models['tex_slat_flow_model_512'] is None:
             print('Loading Texture Slat Flow 512 model ...')
+            _path = self._sdnq_remap(os.path.join(self.path, self._pretrained_args['models']['tex_slat_flow_model_512']))
             self.models['tex_slat_flow_model_512'] = models.from_pretrained(
-                os.path.join(self.path, self._pretrained_args['models']['tex_slat_flow_model_512']),
+                _path,
                 enable_gguf=getattr(self, 'enable_gguf', False),
                 gguf_quant=getattr(self, 'gguf_quant', 'Q8_0'),
-                precision=getattr(self, 'precision', None)
+                precision=getattr(self, 'precision', None),
+                enable_sdnq=getattr(self, 'enable_sdnq', False),
+                sdnq_use_quantized_matmul=getattr(self, 'sdnq_use_quantized_matmul', True),
+                sdnq_torch_compile=getattr(self, 'sdnq_torch_compile', False),
             )
             self.models['tex_slat_flow_model_512'].eval()
             self.models['tex_slat_flow_model_512'].to(self._device)          
@@ -317,11 +347,15 @@ class Trellis2ImageTo3DPipeline(Pipeline):
     def load_shape_slat_flow_model_1024(self):        
         if self.models['shape_slat_flow_model_1024'] is None:
             print('Loading Shape Slat Flow 1024 model ...')
+            _path = self._sdnq_remap(os.path.join(self.path, self._pretrained_args['models']['shape_slat_flow_model_1024']))
             self.models['shape_slat_flow_model_1024'] = models.from_pretrained(
-                os.path.join(self.path, self._pretrained_args['models']['shape_slat_flow_model_1024']),
+                _path,
                 enable_gguf=getattr(self, 'enable_gguf', False),
                 gguf_quant=getattr(self, 'gguf_quant', 'Q8_0'),
-                precision=getattr(self, 'precision', None)
+                precision=getattr(self, 'precision', None),
+                enable_sdnq=getattr(self, 'enable_sdnq', False),
+                sdnq_use_quantized_matmul=getattr(self, 'sdnq_use_quantized_matmul', True),
+                sdnq_torch_compile=getattr(self, 'sdnq_torch_compile', False),
             )
             self.models['shape_slat_flow_model_1024'].eval()
             self.models['shape_slat_flow_model_1024'].to(self._device)           
@@ -335,11 +369,15 @@ class Trellis2ImageTo3DPipeline(Pipeline):
     def load_tex_slat_flow_model_1024(self):        
         if self.models['tex_slat_flow_model_1024'] is None:
             print('Loading Texture Slat Flow 1024 model ...')
+            _path = self._sdnq_remap(os.path.join(self.path, self._pretrained_args['models']['tex_slat_flow_model_1024']))
             self.models['tex_slat_flow_model_1024'] = models.from_pretrained(
-                os.path.join(self.path, self._pretrained_args['models']['tex_slat_flow_model_1024']),
+                _path,
                 enable_gguf=getattr(self, 'enable_gguf', False),
                 gguf_quant=getattr(self, 'gguf_quant', 'Q8_0'),
-                precision=getattr(self, 'precision', None)
+                precision=getattr(self, 'precision', None),
+                enable_sdnq=getattr(self, 'enable_sdnq', False),
+                sdnq_use_quantized_matmul=getattr(self, 'sdnq_use_quantized_matmul', True),
+                sdnq_torch_compile=getattr(self, 'sdnq_torch_compile', False),
             )
             self.models['tex_slat_flow_model_1024'].eval()
             self.models['tex_slat_flow_model_1024'].to(self._device)                   
@@ -1190,7 +1228,8 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         else:
             out_mesh = self.decode_latent(shape_slat, None, res, use_tiled=use_tiled)
         torch.cuda.empty_cache()
-        pbar.update(1)              
+        if pbar is not None:
+            pbar.update(1)
         if return_latent:
             if generate_texture_slat:
                 return out_mesh, (shape_slat, tex_slat, res)

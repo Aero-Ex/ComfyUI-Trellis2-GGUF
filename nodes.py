@@ -327,7 +327,7 @@ class Trellis2_GGUFLoadModel:
                     "GGUF Q8_0", 
                     "GGUF Q6_K", 
                     "GGUF Q5_K_M", 
-                    "GGUF Q4_K_M"
+                    "GGUF Q4_K_M",
                 ], {"default": "Safetensors (BF16)"}),
                 "backend": (["flash_attn","xformers"],{"default":"xformers"}),
                 "device": (["cpu","cuda"],{"default":"cuda"}),
@@ -433,12 +433,28 @@ class Trellis2_GGUFLoadModel:
         if "(BF16)" in model_format: precision = "bf16"
         elif "(FP8)" in model_format: precision = "fp8"
 
+        enable_sdnq = model_format.startswith("sdnq")
+        sdnq_svd_rank = 64 if "svd64" in model_format else 32
+        sdnq_use_quantized_matmul = True
+        sdnq_torch_compile = enable_sdnq  # compile when using SDNQ (~27% speedup)
+
+        # Enable TF32 tensor cores for better performance on Ampere/Ada GPUs
+        if device == "cuda":
+            import torch as _torch
+            _torch.backends.cuda.matmul.allow_tf32 = True
+            _torch.backends.cudnn.allow_tf32 = True
+            _torch.set_float32_matmul_precision('high')
+
         pipeline = Trellis2ImageTo3DPipeline.from_pretrained(
             model_path,
             keep_models_loaded=keep_models_loaded,
             enable_gguf=enable_gguf,
             gguf_quant=gguf_quant,
             precision=precision,
+            enable_sdnq=enable_sdnq,
+            sdnq_use_quantized_matmul=sdnq_use_quantized_matmul,
+            sdnq_torch_compile=sdnq_torch_compile,
+            sdnq_svd_rank=sdnq_svd_rank,
         )
 
         pipeline.low_vram = low_vram
@@ -452,6 +468,26 @@ class Trellis2_GGUFLoadModel:
             pipeline.to(device)
 
         return (pipeline,)
+
+
+class Trellis2_SDNQLoadModel(Trellis2_GGUFLoadModel):
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "modelname": (["TRELLIS.2-4B"],),
+                "model_format": ([
+                    "sdnq_uint4_svd32",
+                    "sdnq_uint4_svd64",
+                ], {"default": "sdnq_uint4_svd64"}),
+                "backend": (["flash_attn","xformers"],{"default":"xformers"}),
+                "device": (["cpu","cuda"],{"default":"cuda"}),
+                "low_vram": ("BOOLEAN",{"default":True}),
+                "keep_models_loaded": ("BOOLEAN", {"default":True}),
+            },
+        }
+
+    CATEGORY = "Trellis2Wrapper (SDNQ)"
 
 
         
@@ -3294,6 +3330,7 @@ NODE_CLASS_MAPPINGS = {
     "Trellis2ReconstructMeshWithQuad_GGUF": Trellis2_GGUFReconstructMeshWithQuad,
     "Trellis2StringSelector_GGUF": Trellis2_GGUFStringSelector,
     "Trellis2FillHolesWithCuMesh_GGUF": Trellis2_GGUFFillHolesWithCuMesh,
+    "Trellis2LoadModel_SDNQ": Trellis2_SDNQLoadModel,
     }
     
 
@@ -3331,4 +3368,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Trellis2ReconstructMeshWithQuad_GGUF": "Trellis2 - Reconstruct Mesh With Quad (GGUF)",
     "Trellis2StringSelector_GGUF": "Trellis2 - String Selector (GGUF)",
     "Trellis2FillHolesWithCuMesh_GGUF": "Trellis2 - Fill Holes with CuMesh (GGUF)",
+    "Trellis2LoadModel_SDNQ": "Trellis2 - LoadModel (SDNQ)",
     }
