@@ -1,5 +1,15 @@
 import importlib
 import sys
+import os
+import json
+import logging
+import inspect
+import torch
+from typing import Any, Optional
+from ..utils import sdnq_utils
+from ..utils import gguf_utils
+
+logger = logging.getLogger("Trellis2")
 
 __attributes = {
     # Sparse Structure
@@ -138,7 +148,10 @@ def __getattr__(name):
     return globals()[name]
 
 
-def from_pretrained(path: str, enable_gguf: bool = False, gguf_quant: str = "Q8_0", **kwargs):
+def from_pretrained(path: str, enable_gguf: bool = False, gguf_quant: str = "Q8_0",
+                    enable_sdnq: bool = False, sdnq_use_quantized_matmul: bool = True,
+                    sdnq_torch_compile: bool = False,
+                    **kwargs):
     """
     Load a model from a pretrained checkpoint.
 
@@ -148,29 +161,26 @@ def from_pretrained(path: str, enable_gguf: bool = False, gguf_quant: str = "Q8_
 
     Args:
         path: Absolute path prefix for the model (without .json / .safetensors / .gguf).
+              For SDNQ: pass the SDNQ directory path (already resolved by the pipeline).
               e.g.  /path/to/models/Trellis2/ckpts/ss_flow_img_dit_1_3B_64_bf16
         enable_gguf: Load as GGUF instead of Safetensors.
         gguf_quant:  GGUF quantization type (e.g. "Q6_K").
         precision:   Safetensors precision suffix override (e.g. "fp8", "bf16").
+        enable_sdnq: Load as SDNQ quantized model (uint4 + SVD). Path must be a directory.
+        sdnq_use_quantized_matmul: Use int8 quantized matmul (requires Triton).
     """
-    import os
-    import sys
-    import json
-    import torch
-    import torch.nn.init as init
-    import inspect
     from safetensors.torch import load_file
     from ..utils import gguf_utils
 
     # Import model_manager for centralized file resolution
-    import importlib.util, sys as _sys
+    import importlib.util
     _mm_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "model_manager.py")
-    if "trellis2_gguf_model_manager" not in _sys.modules:
-        spec = importlib.util.spec_from_file_location("trellis2_gguf_model_manager", _mm_path)
+    if "trellis2_model_manager" not in sys.modules:
+        spec = importlib.util.spec_from_file_location("trellis2_model_manager", _mm_path)
         _mm = importlib.util.module_from_spec(spec)
-        _sys.modules["trellis2_gguf_model_manager"] = _mm
+        sys.modules["trellis2_model_manager"] = _mm
         spec.loader.exec_module(_mm)
-    model_manager = _sys.modules["trellis2_gguf_model_manager"]
+    model_manager = sys.modules["trellis2_model_manager"]
 
     if gguf_quant and gguf_quant.startswith("GGUF_"):
         gguf_quant = gguf_quant[5:]
@@ -178,7 +188,94 @@ def from_pretrained(path: str, enable_gguf: bool = False, gguf_quant: str = "Q8_
     precision = kwargs.pop("precision", None)
     basename = os.path.basename(path)
 
-    print(f"[Trellis2-models] from_pretrained: {basename}  enable_gguf={enable_gguf}  quant={gguf_quant}  precision={precision}", file=sys.stderr)
+    logger.debug("Loading %s  sdnq=%s  gguf=%s", basename, enable_sdnq, enable_gguf)
+
+    # ------------------------------------------------------------------ #
+    # SDNQ loading: flat layout  sdnq/{name}_quantization_config.json
+    #               or legacy    sdnq/{name}/quantization_config.json
+    # ------------------------------------------------------------------ #
+    _sdnq_is_flat   = os.path.isfile(path + "_quantization_config.json")
+    _sdnq_is_subdir = os.path.isdir(path) and os.path.exists(os.path.join(path, "quantization_config.json"))
+    _is_sdnq = _sdnq_is_flat or _sdnq_is_subdir or (enable_sdnq and (os.path.isdir(path) or _sdnq_is_flat))
+    if _is_sdnq and (_sdnq_is_flat or _sdnq_is_subdir or os.path.isdir(path)):
+        # Resolve files for both layouts
+        if _sdnq_is_flat:
+            _sdnq_dir = os.path.dirname(path)  # parent dir for display
+            _sdnq_name = os.path.basename(path)
+            _qconfig_path = path + "_quantization_config.json"
+            _parent = os.path.dirname(path)
+            # model config json: {name}.json (same name, not the quantization one)
+            _json_files = [f for f in os.listdir(_parent)
+                           if f == _sdnq_name + ".json"]
+            if not _json_files:
+                # fallback: any json starting with the name that isn't a quant config
+                _json_files = [f for f in os.listdir(_parent)
+                               if f.startswith(_sdnq_name) and f.endswith(".json")
+                               and not f.endswith("_quantization_config.json")]
+            _st_files = [f for f in os.listdir(_parent)
+                         if f == _sdnq_name + ".safetensors"]
+            if not _json_files:
+                raise FileNotFoundError(f"[Trellis2-SDNQ] No model config .json for {_sdnq_name} in {_parent}")
+            if not _st_files:
+                raise FileNotFoundError(f"[Trellis2-SDNQ] No .safetensors for {_sdnq_name} in {_parent}")
+            _config_file  = os.path.join(_parent, _json_files[0])
+            _weights_file = os.path.join(_parent, _st_files[0])
+            _cache_path   = path + ".pt"  # sdnq/{name}.pt
+        else:
+            _sdnq_dir = path
+            _qconfig_path = os.path.join(_sdnq_dir, "quantization_config.json")
+            _json_files = [f for f in os.listdir(_sdnq_dir)
+                           if f.endswith(".json") and f != "quantization_config.json"]
+            if not _json_files:
+                raise FileNotFoundError(f"[Trellis2-SDNQ] No model config .json found in {_sdnq_dir}")
+            _config_file = os.path.join(_sdnq_dir, _json_files[0])
+            _st_files = [f for f in os.listdir(_sdnq_dir) if f.endswith(".safetensors")]
+            if not _st_files:
+                raise FileNotFoundError(f"[Trellis2-SDNQ] No .safetensors weights found in {_sdnq_dir}")
+            _weights_file = os.path.join(_sdnq_dir, _st_files[0])
+            _cache_path   = _sdnq_dir.rstrip("/\\") + ".pt"
+
+        logger.debug("SDNQ weights: %s", os.path.basename(_weights_file))
+
+        _dev = kwargs.get("device", "cuda:0" if torch.cuda.is_available() else "cpu")
+
+        # Set SDNQ engine options in environment before sdnq is imported
+        os.environ["SDNQ_USE_TORCH_COMPILE"] = "1" if sdnq_torch_compile else "0"
+
+        try:
+            import sdnq  # noqa: just verify sdnq is importable before proceeding
+        except ImportError as _e:
+            raise ImportError(
+                f"[Trellis2-SDNQ] Cannot import sdnq. Make sure it is installed (pip install sdnq).\n"
+                f"  Original error: {_e}"
+            ) from _e
+
+        # SDNQ loading tools
+        _pkg_root = __name__.rsplit('.', 1)[0]
+
+        # Cache: flat → {name}.pt; legacy → {subdir}.pt (already set above in each branch)
+        if os.path.isfile(_cache_path) and os.path.getmtime(_cache_path) >= os.path.getmtime(_weights_file):
+            _csz = os.path.getsize(_cache_path) / 1024**2
+            logger.info("SDNQ: loading from cache  %s  (%.0f MB)", os.path.basename(_cache_path), _csz)
+            
+            sdnq_utils.apply_sparse_linear_patch(_pkg_root)
+            sdnq_utils.alias_trellis_package(_pkg_root)
+
+            _model = torch.load(_cache_path, map_location="cpu", weights_only=False)
+            return sdnq_utils.finalize_sdnq_model(_model, _pkg_root, _dev, sdnq_use_quantized_matmul, sdnq_torch_compile)
+
+        # Fast build — shape-derived SDNQDequantizer, no SVD on random weights, no .pt cache
+        from ..utils.sdnq_fast_loader import fast_sdnq_load
+        return fast_sdnq_load(
+            weights_file=_weights_file,
+            config_file=_config_file,
+            qconfig_file=_qconfig_path,
+            pkg_root=_pkg_root,
+            use_quantized_matmul=sdnq_use_quantized_matmul,
+            torch_compile=sdnq_torch_compile,
+            device=_dev,
+        )
+    # ------------------------------------------------------------------ #
 
     # ── Resolve local paths via model_manager (NO downloads here) ────────
     config_file, model_file, is_gguf = model_manager.resolve_local_path(
@@ -188,14 +285,14 @@ def from_pretrained(path: str, enable_gguf: bool = False, gguf_quant: str = "Q8_
         precision=precision,
     )
 
-    print(f"[Trellis2-models] Resolved: {os.path.basename(model_file)}", file=sys.stderr)
+    logger.debug("Resolved: %s", os.path.basename(model_file))
 
     # ── Load checkpoint ───────────────────────────────────────────────────
     with open(config_file, 'r') as f:
         config = json.load(f)
 
     if is_gguf:
-        print(f"[TRELLIS2] Loading GGUF: {os.path.basename(model_file)}", file=sys.stderr)
+        logger.info("GGUF: %s", os.path.basename(model_file))
         sd, metadata = gguf_utils.load_gguf_checkpoint(model_file)
         if metadata:
             meta_map = {
@@ -208,19 +305,23 @@ def from_pretrained(path: str, enable_gguf: bool = False, gguf_quant: str = "Q8_
             for k, v in meta_map.items():
                 if k in metadata:
                     config['args'][v] = metadata[k]
+        # Always infer from actual weight shapes — most reliable source of truth
+        # (handles GGUF files built with different dims than the json specifies)
         config = _infer_arch_from_sd(sd, config)
-        print(f"[Trellis2-models]   Arch inferred from sd: model_channels={config['args'].get('model_channels')} "
-              f"num_blocks={config['args'].get('num_blocks')} "
-              f"mlp_ratio={config['args'].get('mlp_ratio')}", file=sys.stderr)
+        logger.debug("Arch: model_channels=%s  num_blocks=%s  mlp_ratio=%s",
+                     config['args'].get('model_channels'),
+                     config['args'].get('num_blocks'),
+                     config['args'].get('mlp_ratio'))
     else:
         sd = load_file(model_file)
 
-    # ── Build model (skip random init for speed) ──────────────────────────
+    # Build model (skip random init for speed)
     model_class = __getattr__(config['name'])
     _orig_init_weights = getattr(model_class, 'initialize_weights', None)
     if _orig_init_weights:
         model_class.initialize_weights = lambda self: None
 
+    init = torch.nn.init
     _init_funcs = ['normal_', 'kaiming_uniform_', 'uniform_', 'zeros_', 'ones_',
                    'kaiming_normal_', 'xavier_uniform_', 'xavier_normal_', 'constant_']
     _orig_inits = {name: getattr(init, name) for name in _init_funcs if hasattr(init, name)}
@@ -246,20 +347,23 @@ def from_pretrained(path: str, enable_gguf: bool = False, gguf_quant: str = "Q8_
     model.load_state_dict(sd, strict=False)
 
     if not is_gguf:
+        # Reload directly to CUDA for FP16 models (avoids CPU overhead)
         device = "cuda:0" if torch.cuda.is_available() else "cpu"
         try:
             sd_loaded = load_file(model_file, device=device)
             model.load_state_dict(sd_loaded, strict=False)
         except Exception as e:
-            print(f"[Trellis2-models] Fast load failed ({e}), using CPU fallback", file=sys.stderr)
+            logger.warning("Direct CUDA load failed (%s), using CPU fallback", e)
             model.load_state_dict(load_file(model_file), strict=False)
 
     return model
+
 
 # For Pylance
 if __name__ == '__main__':
     from .sparse_structure_vae import SparseStructureEncoder, SparseStructureDecoder
     from .sparse_structure_flow import SparseStructureFlowModel
     from .structured_latent_flow import SLatFlowModel, ElasticSLatFlowModel
+        
     from .sc_vaes.sparse_unet_vae import SparseUnetVaeEncoder, SparseUnetVaeDecoder
     from .sc_vaes.fdg_vae import FlexiDualGridVaeEncoder, FlexiDualGridVaeDecoder
