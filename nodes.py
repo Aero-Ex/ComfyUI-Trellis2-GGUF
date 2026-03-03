@@ -36,7 +36,7 @@ import comfy.model_management as mm
 from comfy.utils import load_torch_file, ProgressBar, common_upscale
 import comfy.utils
 
-from .trellis2_gguf.pipelines import Trellis2ImageTo3DPipeline
+from .trellis2_gguf.pipelines import Trellis2GGUFImageTo3DPipeline
 from .trellis2_gguf.representations import Mesh, MeshWithVoxel
 
 script_directory = os.path.dirname(os.path.abspath(__file__))
@@ -448,7 +448,7 @@ class Trellis2_GGUFLoadModel:
             _torch.backends.cudnn.allow_tf32 = True
             _torch.set_float32_matmul_precision('high')
 
-        pipeline = Trellis2ImageTo3DPipeline.from_pretrained(
+        pipeline = Trellis2GGUFImageTo3DPipeline.from_pretrained(
             model_path,
             keep_models_loaded=keep_models_loaded,
             enable_gguf=enable_gguf,
