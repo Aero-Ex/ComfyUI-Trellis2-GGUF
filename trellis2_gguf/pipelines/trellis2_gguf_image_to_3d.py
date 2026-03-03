@@ -181,7 +181,7 @@ class Trellis2GGUFImageTo3DPipeline(Pipeline):
 
     @classmethod
     def from_pretrained(cls, path: str, config_file: str = "pipeline.json", keep_models_loaded = True,
-                        enable_gguf: bool = False, gguf_quant: str = "Q8_0", precision: str = None) -> "Trellis2GGUFImageTo3DPipeline":
+                        enable_gguf: bool = False, gguf_quant: str = "Q8_0", precision: str = None, **kwargs) -> "Trellis2GGUFImageTo3DPipeline":
         """
         Load a pretrained model.
 
@@ -224,6 +224,7 @@ class Trellis2GGUFImageTo3DPipeline(Pipeline):
         pipeline.enable_gguf = enable_gguf
         pipeline.gguf_quant = gguf_quant
         pipeline.precision = precision
+        pipeline.sdnq_kwargs = kwargs
         
         pipeline._pretrained_args['models']['sparse_structure_decoder'] = os.path.join(folder_paths.models_dir,"Trellis2","decoders","Stage1","ss_dec_conv3d_16l8_fp16")
         # Check both the new consolidated location and the old legacy location for DINOv3
@@ -241,7 +242,8 @@ class Trellis2GGUFImageTo3DPipeline(Pipeline):
                 os.path.join(self.path, self._pretrained_args['models']['sparse_structure_flow_model']),
                 enable_gguf=getattr(self, 'enable_gguf', False),
                 gguf_quant=getattr(self, 'gguf_quant', 'Q8_0'),
-                precision=getattr(self, 'precision', None)
+                precision=getattr(self, 'precision', None),
+                **getattr(self, 'sdnq_kwargs', {})
             )
             self.models['sparse_structure_flow_model'].eval()
             self.models['sparse_structure_flow_model'].to(self._device)
@@ -301,7 +303,8 @@ class Trellis2GGUFImageTo3DPipeline(Pipeline):
                 os.path.join(self.path, self._pretrained_args['models']['tex_slat_flow_model_512']),
                 enable_gguf=getattr(self, 'enable_gguf', False),
                 gguf_quant=getattr(self, 'gguf_quant', 'Q8_0'),
-                precision=getattr(self, 'precision', None)
+                precision=getattr(self, 'precision', None),
+                **getattr(self, 'sdnq_kwargs', {})
             )
             self.models['tex_slat_flow_model_512'].eval()
             self.models['tex_slat_flow_model_512'].to(self._device)          
@@ -317,7 +320,8 @@ class Trellis2GGUFImageTo3DPipeline(Pipeline):
             print('Loading Texture Slat decoder model ...')
             self.models['tex_slat_decoder'] = models.from_pretrained(
                 os.path.join(self.path, self._pretrained_args['models']['tex_slat_decoder']),
-                precision=getattr(self, 'precision', None)
+                precision=getattr(self, 'precision', None),
+                **getattr(self, 'sdnq_kwargs', {})
             )
             self.models['tex_slat_decoder'].eval()
             self.models['tex_slat_decoder'].to(self._device)

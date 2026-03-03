@@ -66,14 +66,23 @@ class Trellis2GGUFTexturingPipeline(Pipeline):
         self._device = 'cpu'
 
     @classmethod
-    def from_pretrained(cls, path: str, config_file: str = "pipeline.json") -> "Trellis2GGUFTexturingPipeline":
+    def from_pretrained(cls, path: str, config_file: str = "pipeline.json", keep_models_loaded = True,
+                        enable_gguf: bool = False, gguf_quant: str = "Q8_0", precision: str = None, **kwargs) -> "Trellis2GGUFTexturingPipeline":
         """
         Load a pretrained model.
 
         Args:
             path (str): The path to the model. Can be either local path or a Hugging Face repository.
         """
-        pipeline = super().from_pretrained(path, config_file)
+        pipeline = super().from_pretrained(
+            path,
+            config_file,
+            keep_models_loaded=keep_models_loaded,
+            enable_gguf=enable_gguf,
+            gguf_quant=gguf_quant,
+            precision=precision,
+            **kwargs
+        )
         args = pipeline._pretrained_args
 
         pipeline.tex_slat_sampler = getattr(samplers, args['tex_slat_sampler']['name'])(**args['tex_slat_sampler']['args'])
@@ -92,6 +101,10 @@ class Trellis2GGUFTexturingPipeline(Pipeline):
             'roughness': slice(4, 5),
             'alpha': slice(5, 6),
         }
+        pipeline.enable_gguf = enable_gguf
+        pipeline.gguf_quant = gguf_quant
+        pipeline.precision = precision
+        pipeline.sdnq_kwargs = kwargs
         pipeline._device = 'cpu'
         return pipeline
 
