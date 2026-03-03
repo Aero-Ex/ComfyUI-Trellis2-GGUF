@@ -101,6 +101,16 @@ def finalize_sdnq_model(model: torch.nn.Module, pkg_name: str, device: str = "cu
     Perform final model preparation: move to device, enable quantized matmul, 
     wrap sparse layers, and optionally compile.
     """
+    # Manually sync sdnq backend options to ensure they match the requested state
+    # even if the backend was already imported.
+    try:
+        import sdnq.common as _sc
+        import sdnq.sdnext as _sn
+        _sc.use_torch_compile = torch_compile
+        _sn.shared.opts.sdnq_dequantize_compile = torch_compile
+    except Exception as _sync_err:
+        logger.debug("Failed to sync sdnq backend defaults: %s", _sync_err)
+
     from sdnq.loader import apply_sdnq_options_to_model
     
     model = model.to(device).eval()
@@ -119,6 +129,9 @@ def finalize_sdnq_model(model: torch.nn.Module, pkg_name: str, device: str = "cu
             logger.info("Applying torch.compile to %s", _cls_name)
             torch._dynamo.config.capture_scalar_outputs = True
             torch._dynamo.config.suppress_errors = True
+            # Enable on-disk FX graph cache so compiled kernels survive restarts.
+            # TORCHINDUCTOR_CACHE_DIR is set at plugin load time (__init__.py).
+            torch._inductor.config.fx_graph_cache = True
             model = torch.compile(model, dynamic=True, fullgraph=False)
         else:
             logger.debug("Skipping torch.compile for %s (SDNQ kernels already fused)", _cls_name)

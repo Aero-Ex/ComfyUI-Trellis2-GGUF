@@ -239,6 +239,9 @@ def from_pretrained(path: str, enable_gguf: bool = False, gguf_quant: str = "Q8_
 
         _dev = kwargs.get("device", "cuda:0" if torch.cuda.is_available() else "cpu")
 
+        # Set SDNQ engine options in environment before sdnq is imported
+        os.environ["SDNQ_USE_TORCH_COMPILE"] = "1" if sdnq_torch_compile else "0"
+
         try:
             import sdnq  # noqa: just verify sdnq is importable before proceeding
         except ImportError as _e:

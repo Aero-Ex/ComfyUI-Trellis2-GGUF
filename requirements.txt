@@ -11,3 +11,5 @@ trimesh
 rectpack
 numpy
 bpy
+sdnq
+transformers==5.2.0

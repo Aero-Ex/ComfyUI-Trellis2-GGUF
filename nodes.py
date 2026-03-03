@@ -342,7 +342,8 @@ class Trellis2_GGUFLoadModel:
     CATEGORY = "Trellis2Wrapper (GGUF)"
     OUTPUT_NODE = True
 
-    def process(self, modelname, model_format, backend, device, low_vram, keep_models_loaded):
+    def process(self, modelname, model_format, backend, device, low_vram, keep_models_loaded,
+                sdnq_use_quantized_matmul=None, sdnq_torch_compile=None):
         os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '1'
         os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"  # Can save GPU memory
         #os.environ["FLEX_GEMM_AUTOTUNE_CACHE_PATH"] = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'autotune_cache.json')
@@ -435,8 +436,10 @@ class Trellis2_GGUFLoadModel:
 
         enable_sdnq = model_format.startswith("sdnq")
         sdnq_svd_rank = 64 if "svd64" in model_format else 32
-        sdnq_use_quantized_matmul = True
-        sdnq_torch_compile = enable_sdnq  # compile when using SDNQ (~27% speedup)
+        if sdnq_use_quantized_matmul is None:
+            sdnq_use_quantized_matmul = True
+        if sdnq_torch_compile is None:
+            sdnq_torch_compile = enable_sdnq  # compile when using SDNQ (~27% speedup)
 
         # Enable TF32 tensor cores for better performance on Ampere/Ada GPUs
         if device == "cuda":
@@ -484,10 +487,20 @@ class Trellis2_SDNQLoadModel(Trellis2_GGUFLoadModel):
                 "device": (["cpu","cuda"],{"default":"cuda"}),
                 "low_vram": ("BOOLEAN",{"default":True}),
                 "keep_models_loaded": ("BOOLEAN", {"default":True}),
+                "use_quantized_matmul": ("BOOLEAN", {"default":True, "tooltip":"Enable int8 quantized matmul (faster inference on supported GPUs)"}),
+                "torch_compile": ("BOOLEAN", {"default":True, "tooltip":"Apply torch.compile to SLat flow models (~27% faster, requires more VRAM on first run)"}),
             },
         }
 
     CATEGORY = "Trellis2Wrapper (SDNQ)"
+
+    def process(self, modelname, model_format, backend, device, low_vram, keep_models_loaded,
+                use_quantized_matmul, torch_compile):
+        return super().process(
+            modelname, model_format, backend, device, low_vram, keep_models_loaded,
+            sdnq_use_quantized_matmul=use_quantized_matmul,
+            sdnq_torch_compile=torch_compile,
+        )
 
 
         

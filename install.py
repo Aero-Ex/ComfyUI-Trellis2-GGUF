@@ -37,8 +37,10 @@ def get_env_info():
     # Torch and CUDA
     try:
         import torch
-        torch_ver = torch.__version__.split('+')[0].split('.')
+        torch_raw = torch.__version__.split('+')[0]
+        torch_ver = torch_raw.split('.')
         info['torch'] = f"torch{torch_ver[0]}{torch_ver[1]}"
+        info['torch_raw'] = torch_raw
         
         if torch.version.cuda:
             cuda_ver = torch.version.cuda.split('.')
@@ -164,6 +166,53 @@ def install_flash_attn(pip_base, env, dry_run=False):
         print("  Please consider switching to a recommended environment for flash-attn support.")
         return False
 
+def install_triton_windows(pip_base, env, dry_run=False):
+    """
+    Installs the correct version of triton-windows based on the PyTorch version 
+    to prevent 'cluster_dims' or other metadata crashes.
+    """
+    if platform.system() != "Windows":
+        return True
+
+    print("\n--- Installing triton-windows ---")
+    
+    torch_raw = env.get('torch_raw', '2.0.0')
+    try:
+        from packaging import version
+    except ImportError:
+        # Fallback if packaging isn't installed for some reason
+        class VersionFallback:
+            def __init__(self, v): self.v = [int(x) for x in v.split('.')[:2]]
+            def __ge__(self, other): return self.v >= [int(x) for x in other.split('.')[:2]]
+        version = type('obj', (object,), {'parse': lambda v: VersionFallback(v)})
+
+    v_torch = version.parse(torch_raw)
+    triton_spec = "triton-windows"
+    
+    if v_torch >= version.parse("2.10.0"):
+        triton_spec = "triton-windows<3.7"
+        print("  Detected Torch >= 2.10. Using triton-windows < 3.7 (v3.6.0)")
+    elif v_torch >= version.parse("2.9.0"):
+        triton_spec = "triton-windows<3.6"
+        print("  Detected Torch >= 2.9. Using triton-windows < 3.6 (v3.5.1)")
+    elif v_torch >= version.parse("2.8.0"):
+        triton_spec = "triton-windows<3.5"
+        print("  Detected Torch >= 2.8. Using triton-windows < 3.5 (v3.4.0)")
+    elif v_torch >= version.parse("2.7.0"):
+        triton_spec = "triton-windows<3.4"
+        print("  Detected Torch >= 2.7. Using triton-windows < 3.4 (v3.3.1)")
+    elif v_torch >= version.parse("2.6.0"):
+        triton_spec = "triton-windows<3.3"
+        print("  Detected Torch >= 2.6. Using triton-windows < 3.3 (v3.2.0)")
+    else:
+        print("  Torch < 2.6 detected. Using default triton-windows.")
+
+    if dry_run:
+        print(f"  [Dry Run] Would run: {' '.join(pip_base + ['install', '-U', triton_spec])}")
+        return True
+    else:
+        return run_command(pip_base + ["install", "-U", triton_spec])
+
 def install():
     parser = argparse.ArgumentParser(description="ComfyUI-Trellis2 Installation")
     parser.add_argument("--dry-run", action="store_true", help="Print the steps without installing")
@@ -200,6 +249,9 @@ def install():
 
     # 2. Install flash-attn from Pozzetti's wheels
     install_flash_attn(pip_base, env, dry_run=args.dry_run)
+    
+    # 3. Install correct triton-windows version
+    install_triton_windows(pip_base, env, dry_run=args.dry_run)
     
     # 3. Define other CUDA wheels
     packages = [
