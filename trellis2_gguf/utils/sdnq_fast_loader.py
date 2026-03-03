@@ -37,7 +37,7 @@ All SDNQDequantizer fields can be derived WITHOUT running SVD/quantization:
                           (None if no grouping, original_shape if grouped)
   group_size            = derived from scale.shape
                           (safetensors scale tells us num_of_groups)
-  re_quantize_for_matmul= True for uint4 (unsigned → always re-quantize)
+  re_quantize_for_matmul= True for int8 (if bit-width or signedness mismatch)
   weights_dtype         = from quantization_config.json
   quantized_matmul_dtype= 'int8' (default for integer types)
   svd_rank/steps        = from quantization_config.json
@@ -89,10 +89,10 @@ def _build_dequantizer(
     """
     Build an SDNQDequantizer using tensor shapes instead of actual tensor math.
 
-    quantized_weight_shape is the UNPACKED output shape passed to unpack_uint4 as
+    quantized_weight_shape is the UNPACKED output shape passed to the dequantizer as
     the .view() target — it must equal original_shape (no grouping) or
     (out, num_groups, group_size) (grouped). It is NOT the packed storage shape
-    from safetensors (which has last-dim halved for uint4).
+    from safetensors (which has last-dim halved for 4-bit types).
 
     group_size / result_shape are derived from the stored scale.shape:
       - scale.ndim == 2 → (out, 1): no grouping → group_size=-1, result_shape=None
@@ -110,7 +110,7 @@ def _build_dequantizer(
         quantized_matmul_dtype = "float16"
 
     # re_quantize_for_matmul (mirrors sdnq_quantize_layer_weight logic)
-    # For uint4: is_unsigned=True → always True; int8: compare bit widths
+    # For int8: is_unsigned=False; bit widths must match
     w_info = dtype_dict[weights_dtype]
     q_info = dtype_dict[quantized_matmul_dtype]
     re_quantize_for_matmul = bool(
@@ -126,7 +126,7 @@ def _build_dequantizer(
 
     # Derive group_size, result_shape, and quantized_weight_shape from scale.shape.
     # For linear: after quantization+grouping, scale.shape = (out, num_groups, 1) or (out, 1)
-    # (Note: if transpose happened, scale.shape would be (1, out) or similar — but for uint4
+    # (Note: if transpose happened, scale.shape would be (1, out) or similar — but for int8
     #  re_quantize_for_matmul=True means transpose never happens, so (out, ...) is guaranteed)
     channel_size = original_shape[-1]
 
@@ -210,7 +210,7 @@ def fast_sdnq_load(
     with open(qconfig_file) as f:
         qcfg = json.load(f)
 
-    weights_dtype = qcfg.get("weights_dtype", "uint4")
+    weights_dtype = qcfg.get("weights_dtype", "int8")
     svd_rank      = int(qcfg.get("svd_rank", 32))
     svd_steps     = int(qcfg.get("svd_steps", 8))
     use_stoch_rnd = bool(qcfg.get("use_stochastic_rounding", False))

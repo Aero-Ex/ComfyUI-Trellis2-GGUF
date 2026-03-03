@@ -166,7 +166,7 @@ def from_pretrained(path: str, enable_gguf: bool = False, gguf_quant: str = "Q8_
         enable_gguf: Load as GGUF instead of Safetensors.
         gguf_quant:  GGUF quantization type (e.g. "Q6_K").
         precision:   Safetensors precision suffix override (e.g. "fp8", "bf16").
-        enable_sdnq: Load as SDNQ quantized model (uint4 + SVD). Path must be a directory.
+        enable_sdnq: Load as SDNQ quantized model (int8 + SVD). Path must be a directory.
         sdnq_use_quantized_matmul: Use int8 quantized matmul (requires Triton).
     """
     from safetensors.torch import load_file

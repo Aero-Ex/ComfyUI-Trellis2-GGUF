@@ -7,7 +7,7 @@ from .. import models
 def _find_sdnq_model_dir(model_path: str, svd_rank: int = 32):
     """
     Given a standard model path (e.g. .../ckpts/ss_flow_img_dit_1_3B_64_bf16),
-    locate the equivalent SDNQ directory (e.g. .../Trellis2/sdnq/ss_flow_img_dit_1_3B_64_uint4_svd32/).
+    locate the equivalent SDNQ directory (e.g. .../Trellis2/sdnq/ss_flow_img_dit_1_3B_64_int8_svd32/).
     Returns the SDNQ directory path if found, else None.
     """
     import os
@@ -19,8 +19,9 @@ def _find_sdnq_model_dir(model_path: str, svd_rank: int = 32):
     models_base = os.path.normpath(models_base)
 
     model_basename = os.path.basename(model_path)
-    # e.g. ss_flow_img_dit_1_3B_64_bf16 → ss_flow_img_dit_1_3B_64_uint4_svd32
-    sdnq_name = model_basename.replace("_bf16", f"_uint4_svd{svd_rank}")
+    base, _ = os.path.splitext(model_basename)
+    # e.g. ss_flow_img_dit_1_3B_64_bf16 → ss_flow_img_dit_1_3B_64_int8_svd{svd_rank}
+    sdnq_name = base.replace(\"_bf16\", f\"_int8_svd{svd_rank}\")
 
     for case in ["Trellis2", "trellis2", "TRELLIS2"]:
         sdnq_dir = os.path.join(models_base, case, "sdnq")

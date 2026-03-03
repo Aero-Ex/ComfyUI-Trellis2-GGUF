@@ -48,8 +48,13 @@ ENC_DEC_PREFIXES = ("ss_dec_", "shape_dec_", "tex_dec_", "shape_enc_", "tex_enc_
 
 
 def get_models_dir() -> str:
-    """Absolute path to models/Trellis2."""
-    return os.path.join(folder_paths.models_dir, "Trellis2")
+    \"\"\"Absolute path to models/Trellis2 (case-robust).\"\"\"
+    base = folder_paths.models_dir
+    for case in [\"Trellis2\", \"trellis2\", \"TRELLIS2\"]:
+        p = os.path.join(base, case)
+        if os.path.isdir(p):
+            return p
+    return os.path.join(base, \"Trellis2\")
 
 
 def remote_path(basename: str, suffix: str) -> str:
@@ -153,7 +158,7 @@ def ensure_model_files(
     Called once during Trellis2LoadModel.process.
 
     Args:
-        model_format: e.g. "GGUF Q6_K", "Safetensors (BF16)", "sdnq_uint4_svd64"
+        model_format: e.g. "GGUF Q6_K", "Safetensors (BF16)", "sdnq_int8_svd64"
         pipeline_config: parsed pipeline.json dict
 
     Returns:
@@ -217,13 +222,14 @@ def ensure_model_files(
             sdnq_dir = os.path.join(root, "sdnq")
             os.makedirs(sdnq_dir, exist_ok=True)
             
-            # Map name: 'ss_flow_img_dit_1_3B_64_bf16' -> 'ss_flow_img_dit_1_3B_64_uint4_svd64'
-            # Note: The model_format might be 'sdnq_uint4_svd64'
-            suffix_to_add = model_format.replace("sdnq_", "")  # 'uint4_svd64'
+            # Map name: 'ss_flow_img_dit_1_3B_64_bf16' -> 'ss_flow_img_dit_1_3B_64_int8_svd64'
+            # Note: The model_format might be 'sdnq_int8_svd64'
+            suffix_to_add = model_format.replace("sdnq_", "")  # 'int8_svd64'
             
-            # Usually base name ends with _bf16, _fp16, or similar
-            base = basename
-            for p in ["_bf16", "_fp16", "_fp8"]:
+            # Usually base name ends with _bf16, _fp16, or similar.
+            # Strip extension first to be robust.
+            base, ext = os.path.splitext(basename)
+            for p in [\"_bf16\", \"_fp16\", \"_fp8\"]:
                 if base.endswith(p):
                     base = base[:len(base)-len(p)]
                     break
@@ -240,7 +246,19 @@ def ensure_model_files(
                     try:
                         hf_hub_download(repo_id=SDNQ_REPO, filename=fn, local_dir=sdnq_dir)
                     except Exception as e:
-                        print(f"[ModelManager] ⚠ Failed to download SDNQ {fn}: {e}")
+                        print(f\"[ModelManager] ⚠ Failed to download SDNQ {fn}: {e}\")
+
+            # Verification: Ensure all 3 files exist before proceeding
+            missing_files = []
+            for sfx in sdnq_suffixes:
+                if not os.path.exists(os.path.join(sdnq_dir, sdnq_basename + sfx)):
+                    missing_files.append(sdnq_basename + sfx)
+            
+            if missing_files:
+                raise FileNotFoundError(
+                    f\"[ModelManager] ✘ Missing required SDNQ files in {sdnq_dir}: {', '.join(missing_files)}. \"
+                    f\"Please check your internet connection or manually download them from {SDNQ_REPO}.\"
+                )
             
             # For SDNQ, we don't 'resolve_local_path' the usual way as it expects 
             # safetensors in root or nested folders, whereas SDNQ is in sdnq/ folder.
