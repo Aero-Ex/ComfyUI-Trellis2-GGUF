@@ -480,9 +480,9 @@ class Trellis2_SDNQLoadModel(Trellis2_GGUFLoadModel):
             "required": {
                 "modelname": (["TRELLIS.2-4B"],),
                 "model_format": ([
-                    "sdnq_uint4_svd32",
-                    "sdnq_uint4_svd64",
-                ], {"default": "sdnq_uint4_svd64"}),
+                    "sdnq_int8_svd32",
+                    "sdnq_int8_svd64",
+                ], {"default": "sdnq_int8_svd64"}),
                 "backend": (["flash_attn","xformers"],{"default":"xformers"}),
                 "device": (["cpu","cuda"],{"default":"cuda"}),
                 "low_vram": ("BOOLEAN",{"default":True}),
