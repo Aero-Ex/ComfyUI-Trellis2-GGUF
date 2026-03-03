@@ -186,7 +186,12 @@ def from_pretrained(path: str, enable_gguf: bool = False, gguf_quant: str = "Q8_
         gguf_quant = gguf_quant[5:]
 
     precision = kwargs.pop("precision", None)
-    basename = os.path.basename(path)
+    if enable_sdnq:
+        _sdnq_svd_rank = kwargs.get("sdnq_svd_rank", 64)
+        if "ckpts" in path:
+            path = path.replace(os.sep + "ckpts" + os.sep, os.sep + "sdnq" + os.sep).replace("/ckpts/", "/sdnq/")
+        path = path.replace("_bf16", f"_int8_svd{_sdnq_svd_rank}")
+        basename = os.path.basename(path)
 
     logger.debug("Loading %s  sdnq=%s  gguf=%s", basename, enable_sdnq, enable_gguf)
 
