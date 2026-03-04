@@ -354,53 +354,6 @@ class Trellis2_GGUFLoadModel:
         
         torch.backends.cudnn.benchmark = False
         
-        download_path = os.path.join(folder_paths.models_dir,"microsoft")
-        model_path = os.path.join(download_path, modelname)
-        
-        hf_model_name = f"microsoft/{modelname}"
-        
-        if not os.path.exists(model_path):
-            print(f"Downloading model to: {model_path}")
-            from huggingface_hub import snapshot_download
-            snapshot_download(
-                repo_id=hf_model_name,
-                local_dir=model_path,
-                local_dir_use_symlinks=False,
-            )
-            
-        dinov3_model_path = os.path.join(folder_paths.models_dir,"facebook","dinov3-vitl16-pretrain-lvd1689m","model.safetensors")
-        if not os.path.exists(dinov3_model_path):
-            print(f"Downloading DINOv3 model from Aero-Ex/Dinov3...")
-            from huggingface_hub import snapshot_download
-            snapshot_download(
-                repo_id="Aero-Ex/Dinov3",
-                local_dir=folder_paths.models_dir,
-                allow_patterns=["facebook/dinov3-vitl16-pretrain-lvd1689m/*"],
-                local_dir_use_symlinks=False,
-            )
-            if not os.path.exists(dinov3_model_path):
-                raise Exception("Failed to download Facebook Dinov3 model from Aero-Ex/Dinov3")
-        
-        trellis_image_large_path = os.path.join(folder_paths.models_dir,"microsoft","TRELLIS-image-large","ckpts","ss_dec_conv3d_16l8_fp16.safetensors")
-        if not os.path.exists(trellis_image_large_path):
-            print('Trellis-Image-Large ss_dec_conv3d_16l8_fp16 files not found. Trying to download the files from huggingface ...')
-            import requests
-            url = "https://huggingface.co/microsoft/TRELLIS-image-large/resolve/main/ckpts/ss_dec_conv3d_16l8_fp16.json?download=true"
-            filename = os.path.join(folder_paths.models_dir,"microsoft","TRELLIS-image-large","ckpts","ss_dec_conv3d_16l8_fp16.json")
-            path = Path(filename)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            
-            response = requests.get(url)
-            if response.status_code == 200:
-                with open(filename, "wb") as f:
-                    f.write(response.content)
-                print("Download ss_dec_conv3d_16l8_fp16.json complete!")
-            else:
-                raise Exception("Cannot download Trellis-Image-Large file ss_dec_conv3d_16l8_fp16.json")
-            
-            url = "https://huggingface.co/microsoft/TRELLIS-image-large/resolve/main/ckpts/ss_dec_conv3d_16l8_fp16.safetensors?download=true"
-            filename = os.path.join(folder_paths.models_dir,"microsoft","TRELLIS-image-large","ckpts","ss_dec_conv3d_16l8_fp16.safetensors")
-
         # ── Delegate ALL downloading to model_manager ─────────────────────
         import importlib.util, sys as _sys
         _mm_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "model_manager.py")
