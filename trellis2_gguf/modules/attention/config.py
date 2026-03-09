@@ -56,7 +56,7 @@ def __from_env():
 __from_env()
     
 
-def set_backend(backend: Literal['xformers', 'flash_attn']):
+def set_backend(backend: Literal['xformers', 'flash_attn', 'flash_attn_3', 'sdpa']):
     global BACKEND
     BACKEND = backend
 

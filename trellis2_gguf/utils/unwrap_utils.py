@@ -10,7 +10,7 @@ def check_bpy_available():
         import bpy
         import bmesh
         return True
-    except ImportError:
+    except Exception:
         return False
 
 def python_smart_unwrap_glb(vertices: np.ndarray, faces: np.ndarray, margin=0.01, angle_limit=1.15192):

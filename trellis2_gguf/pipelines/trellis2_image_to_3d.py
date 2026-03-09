@@ -133,6 +133,59 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             torch.cuda.synchronize()
             torch.cuda.empty_cache()
 
+    def _get_sampler(self, sampler_name: Optional[str], default_sampler: samplers.Sampler, **kwargs) -> samplers.Sampler:
+        """
+        Get a sampler by name, or return the default sampler.
+        """
+        if sampler_name is None or sampler_name == "" or sampler_name == "default":
+            return default_sampler
+        
+        # Determine the base class name based on the default sampler
+        base_class = default_sampler.__class__.__name__
+        
+        # Map simple names to class prefixes
+        name_map = {
+            "euler": "FlowEuler",
+            "heun": "FlowHeun",
+            "rk4": "FlowRK4",
+            "rk5": "FlowRK5",
+        }
+        prefix = name_map.get(sampler_name.lower(), "FlowEuler")
+        
+        # Construct the target class name by replacing the prefix
+        # e.g., FlowEulerGuidanceIntervalSampler -> FlowRK4GuidanceIntervalSampler
+        if base_class.startswith("FlowEuler"):
+            target_class_name = base_class.replace("FlowEuler", prefix)
+        elif base_class.startswith("FlowHeun"):
+            target_class_name = base_class.replace("FlowHeun", prefix)
+        elif base_class.startswith("FlowRK4"):
+            target_class_name = base_class.replace("FlowRK4", prefix)
+        elif base_class.startswith("FlowRK5"):
+            target_class_name = base_class.replace("FlowRK5", prefix)
+        else:
+            # Fallback if the base class doesn't match expected patterns
+            target_class_name = prefix + "Sampler"
+            
+        target_class = getattr(samplers, target_class_name, None)
+        if target_class is None:
+            print(f"[Trellis2] Warning: Sampler {target_class_name} not found, using default {base_class}")
+            return default_sampler
+            
+        # Initialize the new sampler with parameters from the default one if possible
+        # Most samplers in this repo take sigma_min in __init__
+        try:
+            init_args = {'sigma_min': getattr(default_sampler, 'sigma_min', 1e-3)}
+            # If the default sampler has other attributes like resolution, copy them
+            for attr in ['resolution']:
+                if hasattr(default_sampler, attr):
+                    init_args[attr] = getattr(default_sampler, attr)
+            # Override with explicitly passed kwargs
+            init_args.update(kwargs)
+            return target_class(**init_args)
+        except Exception as e:
+            print(f"[Trellis2] Warning: Could not initialize {target_class_name}: {e}")
+            return default_sampler
+
     def move_all_to_cpu(self):
         """Move all models in the pipeline to CPU."""
         print("[Trellis2] Offloading all models to CPU...")
@@ -541,6 +594,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         resolution: int,
         num_samples: int = 1,
         sampler_params: dict = {},
+        sampler: str = None,
     ) -> torch.Tensor:
         """
         Sample sparse structures with the given conditioning.
@@ -561,7 +615,9 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         sampler_params = {**self.sparse_structure_sampler_params, **sampler_params}
         if self.low_vram:
             flow_model.to(self.device)
-        z_s = self.sparse_structure_sampler.sample(
+        
+        active_sampler = self._get_sampler(sampler, self.sparse_structure_sampler)
+        z_s = active_sampler.sample(
             flow_model,
             noise,
             **cond,
@@ -598,6 +654,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         flow_model,
         coords: torch.Tensor,
         sampler_params: dict = {},
+        sampler: str = None,
     ) -> SparseTensor:
         """
         Sample structured latent with the given conditioning.
@@ -619,7 +676,8 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         sampler_params = {**self.shape_slat_sampler_params, **sampler_params}
         if self.low_vram:
             flow_model.to(self.device)
-        slat = self.shape_slat_sampler.sample(
+        active_sampler = self._get_sampler(sampler, self.shape_slat_sampler)
+        slat = active_sampler.sample(
             flow_model,
             noise,
             **cond,
@@ -653,6 +711,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         coords: torch.Tensor,
         sampler_params: dict = {},
         max_num_tokens: int = 49152,
+        sampler: str = None,
     ) -> SparseTensor:
         """
         Sample structured latent with the given conditioning.
@@ -677,7 +736,9 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         sampler_params = {**self.shape_slat_sampler_params, **sampler_params}
         if self.low_vram:
             flow_model_lr.to(self.device)
-        slat = self.shape_slat_sampler.sample(
+            
+        active_sampler = self._get_sampler(sampler, self.shape_slat_sampler)
+        slat = active_sampler.sample(
             flow_model_lr,
             noise,
             **lr_cond,
@@ -739,7 +800,9 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         sampler_params = {**self.shape_slat_sampler_params, **sampler_params}
         if self.low_vram:
             flow_model.to(self.device)
-        slat = self.shape_slat_sampler.sample(
+            
+        active_sampler = self._get_sampler(sampler, self.shape_slat_sampler)
+        slat = active_sampler.sample(
             flow_model,
             noise,
             **cond,
@@ -802,6 +865,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         flow_model,
         shape_slat: SparseTensor,
         sampler_params: dict = {},
+        sampler: str = None,
     ) -> SparseTensor:
         """
         Sample structured latent with the given conditioning.
@@ -823,7 +887,9 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         sampler_params = {**self.tex_slat_sampler_params, **sampler_params}
         if self.low_vram:
             flow_model.to(self.device)
-        slat = self.tex_slat_sampler.sample(
+            
+        active_sampler = self._get_sampler(sampler, self.tex_slat_sampler)
+        slat = active_sampler.sample(
             flow_model,
             noise,
             concat_cond=shape_slat,
@@ -964,7 +1030,8 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         max_views: int = 4,
         generate_texture_slat = True,
         use_tiled: bool = True,
-        pbar = None
+        pbar = None,
+        sampler: str = None,
     ) -> List[MeshWithVoxel]:
         """
         Run the pipeline.
@@ -1029,7 +1096,8 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         self.load_sparse_structure_model()        
         coords = self.sample_sparse_structure(
             cond_512, sparse_structure_resolution,
-            num_samples, sparse_structure_sampler_params
+            num_samples, sparse_structure_sampler_params,
+            sampler=sampler
         )
         
         if pbar is not None:
@@ -1044,7 +1112,8 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             self.load_shape_slat_flow_model_512()            
             shape_slat = self.sample_shape_slat(
                 cond_512, self.models['shape_slat_flow_model_512'],
-                coords, shape_slat_sampler_params
+                coords, shape_slat_sampler_params,
+                sampler=sampler
             )
             
             if pbar is not None:
@@ -1058,7 +1127,8 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 self.load_tex_slat_flow_model_512()
                 tex_slat = self.sample_tex_slat(
                     cond_512, self.models['tex_slat_flow_model_512'],
-                    shape_slat, tex_slat_sampler_params
+                    shape_slat, tex_slat_sampler_params,
+                    sampler=sampler
                 )
                 
                 if pbar is not None:
@@ -1073,7 +1143,8 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             self.load_shape_slat_flow_model_1024()
             shape_slat = self.sample_shape_slat(
                 cond_1024, self.models['shape_slat_flow_model_1024'],
-                coords, shape_slat_sampler_params
+                coords, shape_slat_sampler_params,
+                sampler=sampler
             )
             
             if pbar is not None:
@@ -1105,7 +1176,8 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 self.models['shape_slat_flow_model_512'], self.models['shape_slat_flow_model_1024'],
                 512, 1024,
                 coords, shape_slat_sampler_params,
-                max_num_tokens
+                max_num_tokens,
+                sampler=sampler
             )
             
             if pbar is not None:
@@ -1136,7 +1208,8 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 self.models['shape_slat_flow_model_512'], self.models['shape_slat_flow_model_1024'],
                 512, 2048,
                 coords, shape_slat_sampler_params,
-                max_num_tokens
+                max_num_tokens,
+                sampler=sampler
             )
             
             if pbar is not None:
@@ -1167,7 +1240,8 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 self.models['shape_slat_flow_model_512'], self.models['shape_slat_flow_model_1024'],
                 512, 4096,
                 coords, shape_slat_sampler_params,
-                max_num_tokens
+                max_num_tokens,
+                sampler=sampler
             )
             
             if pbar is not None:
@@ -1198,7 +1272,8 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 self.models['shape_slat_flow_model_512'], self.models['shape_slat_flow_model_1024'],
                 512, 1536,
                 coords, shape_slat_sampler_params,
-                max_num_tokens
+                max_num_tokens,
+                sampler=sampler
             )
             
             if pbar is not None:
@@ -1258,6 +1333,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         pbar: ProgressBar = None,
         front_axis: str = 'z',
         blend_temperature: float = 2.0,
+        sampler: str = None,
     ) -> List[MeshWithVoxel]:
         """
         Run the pipeline with named multi-view images and spatial blending.
@@ -1323,6 +1399,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             sampler_params=sparse_structure_sampler_params,
             front_axis=front_axis,
             blend_temperature=blend_temperature,
+            sampler=sampler,
         )
         
         if not self.keep_models_loaded:
@@ -1346,6 +1423,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 max_num_tokens,
                 front_axis=front_axis,
                 blend_temperature=blend_temperature,
+                sampler=sampler
             )
             res = 1024
             
@@ -1364,6 +1442,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 max_num_tokens,
                 front_axis=front_axis,
                 blend_temperature=blend_temperature,
+                sampler=sampler
             )
             res = 1536
              
@@ -1379,6 +1458,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                  coords, shape_slat_sampler_params,
                  front_axis=front_axis,
                  blend_temperature=blend_temperature,
+                 sampler=sampler
              )
              res = 512
              if not self.keep_models_loaded:
@@ -1456,6 +1536,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         sampler_params: dict = {},
         front_axis: str = 'z',
         blend_temperature: float = 2.0,
+        sampler: str = None,
     ) -> torch.Tensor:
         """
         Sample sparse structures with multi-view blending.
@@ -1470,17 +1551,18 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         in_channels = flow_model.in_channels
         noise = torch.randn(num_samples, in_channels, reso, reso, reso).to(self.device)
         
-        sampler = samplers.FlowEulerMultiViewGuidanceIntervalSampler(
+        default_sampler = samplers.FlowEulerMultiViewGuidanceIntervalSampler(
             sigma_min=1e-5,
             resolution=flow_model.resolution
         )
+        active_sampler = self._get_sampler(sampler, default_sampler)
         
         sampler_params = {**self.sparse_structure_sampler_params, **sampler_params}
         
         if self.low_vram:
             flow_model.to(self.device)
             
-        z_s = sampler.sample(
+        z_s = active_sampler.sample(
             flow_model,
             noise,
             conds=conds,
@@ -1535,6 +1617,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         sampler_params: dict = {},
         front_axis: str = 'z',
         blend_temperature: float = 2.0,
+        sampler: str = None,
     ) -> SparseTensor:
         if self.low_vram:
             for v in conds:
@@ -1546,17 +1629,18 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             coords=coords_dev,
         )
         
-        sampler = samplers.FlowEulerMultiViewGuidanceIntervalSampler(
+        default_sampler = samplers.FlowEulerMultiViewGuidanceIntervalSampler(
             sigma_min=1e-5,
             resolution=flow_model.resolution,
         )
+        active_sampler = self._get_sampler(sampler, default_sampler)
         
         sampler_params = {**self.shape_slat_sampler_params, **sampler_params}
         
         if self.low_vram:
             flow_model.to(self.device)
             
-        slat = sampler.sample(
+        slat = active_sampler.sample(
             flow_model,
             noise,
             conds=conds,
@@ -1598,6 +1682,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         max_num_tokens: int = 49152,
         front_axis: str = 'z',
         blend_temperature: float = 2.0,
+        sampler: str = None,
     ) -> SparseTensor:
         # LR
         if self.low_vram:
@@ -1612,17 +1697,13 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             coords=coords_dev,
         )
         
-        sampler_lr = samplers.FlowEulerMultiViewGuidanceIntervalSampler(
+        default_sampler_lr = samplers.FlowEulerMultiViewGuidanceIntervalSampler(
             sigma_min=1e-5,
             resolution=flow_model_lr.resolution,
         )
+        active_sampler_lr = self._get_sampler(sampler, default_sampler_lr)
         
-        sampler_params_combined = {**self.shape_slat_sampler_params, **sampler_params}
-        
-        if self.low_vram:
-            flow_model_lr.to(self.device)
-            
-        slat = sampler_lr.sample(
+        slat = active_sampler_lr.sample(
             flow_model_lr,
             noise,
             conds=lr_conds,
@@ -1674,21 +1755,13 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 break
 
         # HR
-        sampler_hr = samplers.FlowEulerMultiViewGuidanceIntervalSampler(
+        default_sampler_hr = samplers.FlowEulerMultiViewGuidanceIntervalSampler(
             sigma_min=1e-5,
             resolution=flow_model.resolution,
         )
+        active_sampler_hr = self._get_sampler(sampler, default_sampler_hr)
         
-        coords_dev = coords.to(self.device).contiguous()
-        noise = SparseTensor(
-            feats=torch.randn(coords_dev.shape[0], flow_model.in_channels, device=self.device),
-            coords=coords_dev,
-        )
-        
-        if self.low_vram:
-            flow_model.to(self.device)
-            
-        d_slat = sampler_hr.sample(
+        d_slat = active_sampler_hr.sample(
             flow_model,
             noise,
             conds=conds,
@@ -1725,6 +1798,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         sampler_params: dict = {},
         front_axis: str = 'z',
         blend_temperature: float = 2.0,
+        sampler: str = None,
     ) -> SparseTensor:
         """
         Sample structured latent for texture with multi-view blending.
@@ -1753,15 +1827,16 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         
         sampler_params = {**self.tex_slat_sampler_params, **sampler_params}
         
-        sampler = samplers.FlowEulerMultiViewGuidanceIntervalSampler(
+        default_sampler_tex = samplers.FlowEulerMultiViewGuidanceIntervalSampler(
             sigma_min=1e-5,
             resolution=flow_model.resolution,
         )
+        active_sampler_tex = self._get_sampler(sampler, default_sampler_tex)
         
         if self.low_vram:
             flow_model.to(self.device)
             
-        slat = sampler.sample(
+        slat = active_sampler_tex.sample(
             flow_model,
             noise,
             conds=conds,
@@ -1790,6 +1865,340 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             
         return slat
 
+    def sample_shape_slat_cascade_advanced(
+        self,
+        lr_cond: dict,
+        cond: dict,
+        flow_model_lr,
+        flow_model,
+        lr_resolution: int,
+        resolution: int,
+        coords: torch.Tensor,
+        low_res_sampler_params: dict = {},
+        high_res_sampler_params: dict = {},
+        max_num_tokens: int = 999999,
+        sparse_structure_resolution: int = 32,
+        low_res_sampler_name: str = 'euler',
+        high_res_sampler_name: str = 'euler',
+    ) -> SparseTensor:
+        """
+        Sample structured latent with the given conditioning.
+        
+        Args:
+            cond (dict): The conditioning information.
+            coords (torch.Tensor): The coordinates of the sparse structure.
+            sampler_params (dict): Additional parameters for the sampler.
+        """
+        # LR
+
+        if self.low_vram:
+            lr_cond = self._cond_to(lr_cond, self.device)
+            cond = self._cond_to(cond, self.device)
+
+        coords_dev = coords.to(self.device)                         
+        # Sample structured latent
+        noise = SparseTensor(
+            feats=torch.randn(coords.shape[0], flow_model_lr.in_channels, device=self.device),
+            coords=coords_dev,
+        )
+        sampler_params = {**self.shape_slat_sampler_params, **low_res_sampler_params}
+        if self.low_vram:
+            flow_model_lr.to(self.device)            
+        
+        active_sampler = self._get_sampler(
+            low_res_sampler_name, 
+            self.shape_slat_sampler, 
+            steps=sampler_params.get("steps", 12)
+        )
+            
+        slat = active_sampler.sample(
+            flow_model_lr,
+            noise,
+            **lr_cond,
+            **sampler_params,
+            verbose=True,
+            tqdm_desc="Sampling shape SLat (LR)",
+        ).samples
+        if self.low_vram:
+            flow_model_lr.cpu()
+            self._cleanup_cuda()                                
+        std = torch.tensor(self.shape_slat_normalization['std'])[None].to(slat.device)
+        mean = torch.tensor(self.shape_slat_normalization['mean'])[None].to(slat.device)
+        slat = slat * std + mean
+        
+        del coords_dev
+        if self.low_vram:
+            lr_cond = self._cond_cpu(lr_cond)
+            self._cleanup_cuda()
+
+        # Upsample       
+        self.load_shape_slat_decoder()
+        if self.low_vram:
+            self.models['shape_slat_decoder'].to(self.device)
+            self.models['shape_slat_decoder'].low_vram = True
+        hr_coords = self.models['shape_slat_decoder'].upsample(slat, upsample_times=4)
+        if self.low_vram:
+            self.models['shape_slat_decoder'].cpu()
+            self.models['shape_slat_decoder'].low_vram = False
+        hr_resolution = resolution
+        
+        if not self.keep_models_loaded:
+            self.unload_shape_slat_decoder()
+            
+        ratio = (sparse_structure_resolution / 32)
+        
+        while True:
+            quant_coords = torch.cat([
+                hr_coords[:, :1],
+                ((hr_coords[:, 1:] + 0.5) / (lr_resolution * ratio) * (hr_resolution // 16)).int(),
+            ], dim=1)
+            coords = quant_coords.unique(dim=0)
+            num_tokens = coords.shape[0]
+            if num_tokens < max_num_tokens:
+                if hr_resolution != resolution:
+                    print(f"Due to the limited number of tokens, the resolution is reduced to {hr_resolution}.")
+                print(f"Num Tokens: {num_tokens}")
+                break
+            hr_resolution -= 128
+            if hr_resolution < 1024 and resolution >= 1024:
+                print(f"Num Tokens: {num_tokens}")
+                hr_resolution = 1024
+                break
+            if hr_resolution < 512:
+                print(f"Num Tokens: {num_tokens}")
+                hr_resolution = 512
+                break
+        
+        coords_dev = coords.to(self.device)                                           
+        # Sample structured latent
+        noise = SparseTensor(
+            feats=torch.randn(coords.shape[0], flow_model.in_channels, device=self.device),
+            coords=coords_dev,
+        )        
+        
+        sampler_params = {**self.shape_slat_sampler_params, **high_res_sampler_params}
+        
+        active_sampler_hr = self._get_sampler(
+            high_res_sampler_name, 
+            self.shape_slat_sampler, 
+            steps=sampler_params.get("steps", 12)
+        )
+        
+        if self.low_vram:
+            flow_model.to(self.device)
+        slat = active_sampler_hr.sample(
+            flow_model,
+            noise,
+            **cond,
+            **sampler_params,
+            verbose=True,
+            tqdm_desc="Sampling shape SLat (HR)",
+        ).samples
+        if self.low_vram:
+            flow_model.cpu()
+            self._cleanup_cuda()                                
+
+        std = torch.tensor(self.shape_slat_normalization['std'])[None].to(slat.device)
+        mean = torch.tensor(self.shape_slat_normalization['mean'])[None].to(slat.device)
+        slat = slat * std + mean
+        
+        del coords_dev
+        if self.low_vram:
+            cond = self._cond_cpu(cond)
+            self._cleanup_cuda()
+
+        return slat, hr_resolution   
+
+    def sample_tex_slat_advanced(
+        self,
+        cond: dict,
+        flow_model,
+        shape_slat: SparseTensor,
+        sampler_params: dict = {},
+        sampler_name: str = 'euler',
+    ) -> SparseTensor:
+        """
+        Sample structured latent with the given conditioning.
+        
+        Args:
+            cond (dict): The conditioning information.
+            shape_slat (SparseTensor): The structured latent for shape
+            sampler_params (dict): Additional parameters for the sampler.
+        """
+        if self.low_vram:
+            cond = self._cond_to(cond, self.device)                                                   
+        # Sample structured latent
+        std = torch.tensor(self.shape_slat_normalization['std'])[None].to(shape_slat.device)
+        mean = torch.tensor(self.shape_slat_normalization['mean'])[None].to(shape_slat.device)
+        shape_slat = (shape_slat - mean) / std
+
+        in_channels = flow_model.in_channels if isinstance(flow_model, nn.Module) else flow_model[0].in_channels
+        noise = shape_slat.replace(feats=torch.randn(shape_slat.coords.shape[0], in_channels - shape_slat.feats.shape[1]).to(self.device))
+        sampler_params = {**self.tex_slat_sampler_params, **sampler_params}
+        
+        active_sampler = self._get_sampler(
+            sampler_name, 
+            self.tex_slat_sampler, 
+            steps=sampler_params.get("steps", 12)
+        )
+        
+        if self.low_vram:
+            flow_model.to(self.device)
+        slat = active_sampler.sample(
+            flow_model,
+            noise,
+            concat_cond=shape_slat,
+            **cond,
+            **sampler_params,
+            verbose=True,
+            tqdm_desc="Sampling texture SLat",
+        ).samples
+        if self.low_vram:
+            flow_model.cpu()
+            self._cleanup_cuda()                    
+
+        std = torch.tensor(self.tex_slat_normalization['std'])[None].to(slat.device)
+        mean = torch.tensor(self.tex_slat_normalization['mean'])[None].to(slat.device)
+        slat = slat * std + mean
+        
+        if self.low_vram:
+            cond = self._cond_cpu(cond)
+            self._cleanup_cuda()                         
+        return slat        
+            
+    @torch.no_grad()
+    def run_cascade(
+        self,
+        image: Image.Image,
+        num_samples: int = 1,
+        seed: int = 42,
+        sparse_structure_sampler_params: dict = {},
+        low_res_shape_slat_sampler_params: dict = {},
+        high_res_shape_slat_sampler_params: dict = {},
+        tex_slat_sampler_params: dict = {},
+        pipeline_type: str = '1024_cascade',
+        max_num_tokens: int = 999999,
+        sparse_structure_resolution: int = 32,
+        generate_texture_slat = True,
+        use_tiled: bool = True,
+        pbar = None,
+        sparse_structure_sampler = 'euler',
+        low_res_shape_sampler = 'euler',
+        high_res_shape_sampler = 'euler',
+        tex_sampler = 'euler',
+        max_views: int = 4
+    ) -> List[MeshWithVoxel]:
+        
+        if isinstance(image, (list, tuple)):
+            images = list(image)
+        else:
+            images = [image]
+            
+        seed_all(seed)
+        
+        # Get Image Cond
+        self.load_image_cond_model()        
+        # Multi-view conditioning happens inside get_cond()              
+        cond_512  = self.get_cond(images, 512, max_views = max_views)        
+        cond_1024 = self.get_cond(images, 1024, max_views = max_views) if pipeline_type != '512' else None
+        
+        if pbar is not None:
+            pbar.update(1)
+        
+        if not self.keep_models_loaded:
+            self.unload_image_cond_model()       
+                
+        # Sampling Sparse Structure
+        self.load_sparse_structure_model()        
+        coords = self.sample_sparse_structure(
+            cond_512, sparse_structure_resolution,
+            num_samples, sparse_structure_sampler_params,
+            sampler=sparse_structure_sampler
+        )
+        
+        if pbar is not None:
+            pbar.update(1)
+        
+        if not self.keep_models_loaded:
+            self.unload_sparse_structure_model()
+        
+        # Sampling Shape
+        if pipeline_type == '1024_cascade':
+            self.load_shape_slat_flow_model_512()
+            self.load_shape_slat_flow_model_1024()            
+            shape_slat, res = self.sample_shape_slat_cascade_advanced(
+                cond_512, cond_1024,
+                self.models['shape_slat_flow_model_512'], self.models['shape_slat_flow_model_1024'],
+                512, 1024,
+                coords, low_res_shape_slat_sampler_params, high_res_shape_slat_sampler_params,
+                max_num_tokens,
+                sparse_structure_resolution,
+                low_res_shape_sampler, high_res_shape_sampler
+            )
+            
+            if pbar is not None:
+                pbar.update(1)
+            
+            if not self.keep_models_loaded:
+                self.unload_shape_slat_flow_model_512()
+                self.unload_shape_slat_flow_model_1024()
+            
+            if generate_texture_slat:
+                self.unload_tex_slat_flow_model_512()
+                self.load_tex_slat_flow_model_1024()
+                tex_slat = self.sample_tex_slat_advanced(
+                    cond_1024, self.models['tex_slat_flow_model_1024'],
+                    shape_slat, tex_slat_sampler_params, tex_sampler
+                )
+                
+            if pbar is not None:
+                pbar.update(1)
+            
+            if not self.keep_models_loaded:
+                self.unload_tex_slat_flow_model_1024()
+        elif pipeline_type == '1536_cascade':
+            self.load_shape_slat_flow_model_512()
+            self.load_shape_slat_flow_model_1024()            
+            shape_slat, res = self.sample_shape_slat_cascade_advanced(
+                cond_512, cond_1024,
+                self.models['shape_slat_flow_model_512'], self.models['shape_slat_flow_model_1024'],
+                512, 1536,
+                coords, low_res_shape_slat_sampler_params, high_res_shape_slat_sampler_params,
+                max_num_tokens,
+                sparse_structure_resolution,
+                low_res_shape_sampler, high_res_shape_sampler
+            )
+            
+            if pbar is not None:
+                pbar.update(1)
+            
+            if not self.keep_models_loaded:
+                self.unload_shape_slat_flow_model_512()
+                self.unload_shape_slat_flow_model_1024()
+            
+            if generate_texture_slat:
+                self.unload_tex_slat_flow_model_512()
+                self.load_tex_slat_flow_model_1024()
+                tex_slat = self.sample_tex_slat_advanced(
+                    cond_1024, self.models['tex_slat_flow_model_1024'],
+                    shape_slat, tex_slat_sampler_params, tex_sampler
+                )
+                
+            if pbar is not None:
+                pbar.update(1)
+            
+            if not self.keep_models_loaded:
+                self.unload_tex_slat_flow_model_1024()         
+            
+        torch.cuda.empty_cache()
+        if generate_texture_slat:
+            out_mesh = self.decode_latent(shape_slat, tex_slat, res, use_tiled=use_tiled)
+        else:
+            out_mesh = self.decode_latent(shape_slat, None, res, use_tiled=use_tiled)
+        torch.cuda.empty_cache()
+        pbar.update(1)              
+
+        return out_mesh
 
     def preprocess_mesh(self, mesh: trimesh.Trimesh) -> trimesh.Trimesh:
         """
@@ -2170,6 +2579,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         use_tiled_decoder: bool = False,
         decoder_tile_size: int = 120,
         decoder_overlap: int = 48,
+        sampler: str = None,
     ):
         
         self.use_tiled_decoder_for_texture = use_tiled_decoder
@@ -2210,7 +2620,8 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             
             tex_slat = self.sample_tex_slat(
                 cond, tex_model,
-                shape_slat, tex_slat_sampler_params
+                shape_slat, tex_slat_sampler_params,
+                sampler=sampler
             )
             
             if not self.keep_models_loaded:
@@ -2261,6 +2672,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         use_tiled_decoder: bool = False,
         decoder_tile_size: int = 120,
         decoder_overlap: int = 48,
+        sampler: str = None,
     ):
         
         self.use_tiled_decoder_for_texture = use_tiled_decoder
@@ -2317,6 +2729,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 sampler_params=tex_slat_sampler_params,
                 front_axis=front_axis,
                 blend_temperature=blend_temperature,
+                sampler=sampler,
             )            
             
             if not self.keep_models_loaded:
@@ -2333,6 +2746,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 sampler_params=tex_slat_sampler_params,
                 front_axis=front_axis,
                 blend_temperature=blend_temperature,
+                sampler=sampler,
             )                          
             
             if not self.keep_models_loaded:
@@ -2385,6 +2799,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         use_tiled_upsample: bool = False,
         upsample_tile_size: int = 16,
         upsample_overlap: int = 2,
+        sampler: str = None,
     ) -> SparseTensor:
         # Upsample       
         self.load_shape_slat_decoder()
@@ -2445,7 +2860,8 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         sampler_params = {**self.shape_slat_sampler_params, **sampler_params}
         if self.low_vram:
             flow_model.to(self.device)
-        slat = self.shape_slat_sampler.sample(
+        active_sampler = self._get_sampler(sampler, self.shape_slat_sampler)
+        slat = active_sampler.sample(
             flow_model,
             noise,
             **cond,
@@ -2492,6 +2908,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         use_tiled_upsample: bool = False,
         upsample_tile_size: int = 16,
         upsample_overlap: int = 2,
+        sampler: str = None,
     ):
         self.use_tiled_decoder_for_texture = use_tiled_decoder
         self.tiled_decoder_size = decoder_tile_size
@@ -2536,6 +2953,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 use_tiled_upsample=use_tiled_upsample,
                 upsample_tile_size=upsample_tile_size,
                 upsample_overlap=upsample_overlap,
+                sampler=sampler,
             )
             
             if not self.keep_models_loaded:
@@ -2546,7 +2964,8 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 self.load_tex_slat_flow_model_512()
                 tex_slat = self.sample_tex_slat(
                     cond, self.models['tex_slat_flow_model_512'],
-                    shape_slat, tex_slat_sampler_params
+                    shape_slat, tex_slat_sampler_params,
+                    sampler=sampler
                 )
             
             if not self.keep_models_loaded:
@@ -2565,6 +2984,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 use_tiled_upsample=use_tiled_upsample,
                 upsample_tile_size=upsample_tile_size,
                 upsample_overlap=upsample_overlap,
+                sampler=sampler,
             )
             
             if not self.keep_models_loaded:
@@ -2594,6 +3014,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 use_tiled_upsample=use_tiled_upsample,
                 upsample_tile_size=upsample_tile_size,
                 upsample_overlap=upsample_overlap,
+                sampler=sampler,
             )
             
             if not self.keep_models_loaded:

@@ -418,3 +418,321 @@ class FlowEulerMultiViewGuidanceIntervalSampler(GuidanceIntervalSamplerMixin, Cl
     """
     pass
 
+# RK4 and RK5 Samplers
+
+class FlowRK4Sampler(FlowEulerSampler):
+    """
+    Generate samples from a flow-matching model using the 4th-order Runge-Kutta method.
+    """
+    @torch.no_grad()
+    def sample_once(
+        self,
+        model,
+        x_t,
+        t: float,
+        t_prev: float,
+        cond: Optional[Any] = None,
+        **kwargs
+    ):
+        dt = t_prev - t
+        
+        # Helper to extract just the velocity prediction
+        def get_v(current_x, current_t):
+            _, _, pred_v = self._get_model_prediction(model, current_x, current_t, cond, **kwargs)
+            return pred_v
+
+        # RK4 intermediate slopes
+        k1 = get_v(x_t, t)
+        k2 = get_v(x_t + 0.5 * dt * k1, t + 0.5 * dt)
+        k3 = get_v(x_t + 0.5 * dt * k2, t + 0.5 * dt)
+        k4 = get_v(x_t + dt * k3, t + dt)
+        
+        # RK4 integration
+        pred_x_prev = x_t + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
+        
+        # We need to return pred_x_0 as well to satisfy the pipeline's logging/tracking
+        # We compute x_start_eps based on the k1 velocity (equivalent to the Euler estimation of x_0)
+        pred_x_0, _ = self._v_to_xstart_eps(x_t=x_t, t=t, v=k1)
+        
+        return edict({"pred_x_prev": pred_x_prev, "pred_x_0": pred_x_0})
+
+
+class FlowRK5Sampler(FlowEulerSampler):
+    """
+    Generate samples from a flow-matching model using Butcher's 5th-order Runge-Kutta method.
+    """
+    @torch.no_grad()
+    def sample_once(
+        self,
+        model,
+        x_t,
+        t: float,
+        t_prev: float,
+        cond: Optional[Any] = None,
+        **kwargs
+    ):
+        dt = t_prev - t
+        
+        # Helper to extract just the velocity prediction
+        def get_v(current_x, current_t):
+            _, _, pred_v = self._get_model_prediction(model, current_x, current_t, cond, **kwargs)
+            return pred_v
+
+        # Intermediate time step fractions for Butcher's RK5
+        c2, c3, c4, c5, c6 = 1/4, 1/4, 1/2, 3/4, 1.0
+        
+        k1 = get_v(x_t, t)
+        k2 = get_v(x_t + dt * (1/4 * k1), t + dt * c2)
+        k3 = get_v(x_t + dt * (1/8 * k1 + 1/8 * k2), t + dt * c3)
+        k4 = get_v(x_t + dt * (-1/2 * k2 + 1.0 * k3), t + dt * c4)
+        k5 = get_v(x_t + dt * (3/16 * k1 + 9/16 * k4), t + dt * c5)
+        k6 = get_v(x_t + dt * (-3/7 * k1 + 2/7 * k2 + 12/7 * k3 - 12/7 * k4 + 8/7 * k5), t + dt * c6)
+        
+        # Final RK5 Integration
+        pred_x_prev = x_t + dt * (7/90 * k1 + 32/90 * k3 + 12/90 * k4 + 32/90 * k5 + 7/90 * k6)
+        
+        # Estimate x_0 based on k1 for tracking
+        pred_x_0, _ = self._v_to_xstart_eps(x_t=x_t, t=t, v=k1)
+        
+        return edict({"pred_x_prev": pred_x_prev, "pred_x_0": pred_x_0})
+
+
+# --- Classifier Free Guidance (CFG) Wrappers ---
+class FlowRK4CfgSampler(ClassifierFreeGuidanceSamplerMixin, FlowRK4Sampler):
+    """RK4 sampling with classifier-free guidance."""
+    @torch.no_grad()
+    def sample(self, model, noise, cond, neg_cond, steps: int = 50, rescale_t: float = 1.0, guidance_strength: float = 3.0, verbose: bool = True, **kwargs):
+        return super().sample(model, noise, cond, steps, rescale_t, verbose, neg_cond=neg_cond, guidance_strength=guidance_strength, **kwargs)
+
+class FlowRK5CfgSampler(ClassifierFreeGuidanceSamplerMixin, FlowRK5Sampler):
+    """RK5 sampling with classifier-free guidance."""
+    @torch.no_grad()
+    def sample(self, model, noise, cond, neg_cond, steps: int = 50, rescale_t: float = 1.0, guidance_strength: float = 3.0, verbose: bool = True, **kwargs):
+        return super().sample(model, noise, cond, steps, rescale_t, verbose, neg_cond=neg_cond, guidance_strength=guidance_strength, **kwargs)
+        
+class FlowRK4GuidanceIntervalSampler(GuidanceIntervalSamplerMixin, ClassifierFreeGuidanceSamplerMixin, FlowRK4Sampler):
+    """RK4 with CFG and Guidance Intervals."""
+    pass
+
+class FlowRK5GuidanceIntervalSampler(GuidanceIntervalSamplerMixin, ClassifierFreeGuidanceSamplerMixin, FlowRK5Sampler):
+    """RK5 with CFG and Guidance Intervals."""
+    pass        
+    
+# RK4 and RK5 for MultiView
+
+class FlowRK4MultiViewSampler(FlowEulerMultiViewSampler):
+    """Multi-view flow matching using 4th-order Runge-Kutta."""
+    @torch.no_grad()
+    def sample_once(
+        self, model, x_t, t: float, t_prev: float, 
+        conds: Dict[str, Any], views: List[str], 
+        front_axis: str = 'z', blend_temperature: float = 2.0, **kwargs
+    ):
+        dt = t_prev - t
+        is_sparse = hasattr(x_t, 'coords')
+        
+        # Calculate spatial blending weights ONCE for the current step
+        if is_sparse:
+            weights = self._compute_view_weights_sparse(x_t.coords, views, front_axis, blend_temperature)
+        else:
+            weights = self._compute_view_weights_dense(x_t.shape, x_t.device, views, front_axis, blend_temperature)
+            
+        # Helper function to compute the blended velocity for a given intermediate x and t
+        def get_blended_v(current_x, current_t):
+            pred_v_accum = 0
+            for i, view in enumerate(views):
+                cond = conds[view]
+                if isinstance(cond, dict) and 'cond' in cond and 'neg_cond' in cond:
+                    pred_v_view = self._inference_model(model, current_x, current_t, cond=cond['cond'], neg_cond=cond['neg_cond'], **kwargs)
+                else:
+                    pred_v_view = self._inference_model(model, current_x, current_t, cond=cond, **kwargs)
+                
+                if is_sparse:
+                    w = weights[:, i].unsqueeze(1)
+                    v_feats = pred_v_view.feats if hasattr(pred_v_view, 'feats') else pred_v_view
+                    pred_v_accum += v_feats * w
+                else:
+                    w = weights[i].unsqueeze(0).unsqueeze(0)
+                    pred_v_accum += pred_v_view * w
+                    
+            if is_sparse:
+                return current_x.replace(feats=pred_v_accum)
+            else:
+                return pred_v_accum
+
+        # RK4 Evaluations
+        k1 = get_blended_v(x_t, t)
+        k2 = get_blended_v(x_t + k1 * (0.5 * dt), t + 0.5 * dt)
+        k3 = get_blended_v(x_t + k2 * (0.5 * dt), t + 0.5 * dt)
+        k4 = get_blended_v(x_t + k3 * dt, t + dt)
+        
+        pred_x_prev = x_t + (k1 + k2 * 2 + k3 * 2 + k4) * (dt / 6.0)
+        pred_x_0, _ = self._v_to_xstart_eps(x_t=x_t, t=t, v=k1)
+        
+        return edict({"pred_x_prev": pred_x_prev, "pred_x_0": pred_x_0})
+
+
+class FlowRK5MultiViewSampler(FlowEulerMultiViewSampler):
+    """Multi-view flow matching using Butcher's 5th-order Runge-Kutta."""
+    @torch.no_grad()
+    def sample_once(
+        self, model, x_t, t: float, t_prev: float, 
+        conds: Dict[str, Any], views: List[str], 
+        front_axis: str = 'z', blend_temperature: float = 2.0, **kwargs
+    ):
+        dt = t_prev - t
+        is_sparse = hasattr(x_t, 'coords')
+        
+        if is_sparse:
+            weights = self._compute_view_weights_sparse(x_t.coords, views, front_axis, blend_temperature)
+        else:
+            weights = self._compute_view_weights_dense(x_t.shape, x_t.device, views, front_axis, blend_temperature)
+            
+        def get_blended_v(current_x, current_t):
+            pred_v_accum = 0
+            for i, view in enumerate(views):
+                cond = conds[view]
+                if isinstance(cond, dict) and 'cond' in cond and 'neg_cond' in cond:
+                    pred_v_view = self._inference_model(model, current_x, current_t, cond=cond['cond'], neg_cond=cond['neg_cond'], **kwargs)
+                else:
+                    pred_v_view = self._inference_model(model, current_x, current_t, cond=cond, **kwargs)
+                
+                if is_sparse:
+                    w = weights[:, i].unsqueeze(1)
+                    v_feats = pred_v_view.feats if hasattr(pred_v_view, 'feats') else pred_v_view
+                    pred_v_accum += v_feats * w
+                else:
+                    w = weights[i].unsqueeze(0).unsqueeze(0)
+                    pred_v_accum += pred_v_view * w
+                    
+            if is_sparse:
+                return current_x.replace(feats=pred_v_accum)
+            else:
+                return pred_v_accum
+
+        # Butcher Tableau Intermediate steps
+        c2, c3, c4, c5, c6 = 1/4, 1/4, 1/2, 3/4, 1.0
+        
+        k1 = get_blended_v(x_t, t)
+        k2 = get_blended_v(x_t + k1 * (dt * 1/4), t + dt * c2)
+        k3 = get_blended_v(x_t + (k1 * 1/8 + k2 * 1/8) * dt, t + dt * c3)
+        k4 = get_blended_v(x_t + (k2 * -1/2 + k3 * 1.0) * dt, t + dt * c4)
+        k5 = get_blended_v(x_t + (k1 * 3/16 + k4 * 9/16) * dt, t + dt * c5)
+        k6 = get_blended_v(x_t + (k1 * -3/7 + k2 * 2/7 + k3 * 12/7 + k4 * -12/7 + k5 * 8/7) * dt, t + dt * c6)
+        
+        pred_x_prev = x_t + (k1 * 7/90 + k3 * 32/90 + k4 * 12/90 + k5 * 32/90 + k6 * 7/90) * dt
+        pred_x_0, _ = self._v_to_xstart_eps(x_t=x_t, t=t, v=k1)
+        
+        return edict({"pred_x_prev": pred_x_prev, "pred_x_0": pred_x_0})
+
+
+class FlowRK4MultiViewGuidanceIntervalSampler(GuidanceIntervalSamplerMixin, ClassifierFreeGuidanceSamplerMixin, FlowRK4MultiViewSampler):
+    pass
+
+class FlowRK5MultiViewGuidanceIntervalSampler(GuidanceIntervalSamplerMixin, ClassifierFreeGuidanceSamplerMixin, FlowRK5MultiViewSampler):
+    pass
+
+# Heun (RK2)
+
+class FlowHeunSampler(FlowEulerSampler):
+    """
+    Generate samples from a flow-matching model using Heun's Method (2nd-order Runge-Kutta).
+    Requires 2 NFEs per step.
+    """
+    @torch.no_grad()
+    def sample_once(
+        self,
+        model,
+        x_t,
+        t: float,
+        t_prev: float,
+        cond: Optional[Any] = None,
+        **kwargs
+    ):
+        dt = t_prev - t
+        
+        # Helper to extract just the velocity prediction
+        def get_v(current_x, current_t):
+            _, _, pred_v = self._get_model_prediction(model, current_x, current_t, cond, **kwargs)
+            return pred_v
+
+        # Step 1: Predictor (Euler step)
+        k1 = get_v(x_t, t)
+        x_temp = x_t + k1 * dt
+        
+        # Step 2: Corrector
+        k2 = get_v(x_temp, t + dt)
+        
+        # Average the two velocities for the final step
+        pred_x_prev = x_t + 0.5 * dt * (k1 + k2)
+        
+        # Estimate x_0 based on k1 for tracking/logging
+        pred_x_0, _ = self._v_to_xstart_eps(x_t=x_t, t=t, v=k1)
+        
+        return edict({"pred_x_prev": pred_x_prev, "pred_x_0": pred_x_0})
+
+# --- CFG Wrapper for Heun ---
+class FlowHeunGuidanceIntervalSampler(GuidanceIntervalSamplerMixin, ClassifierFreeGuidanceSamplerMixin, FlowHeunSampler):
+    """Heun sampling with CFG and Guidance Intervals."""
+    pass
+    
+class FlowHeunMultiViewSampler(FlowEulerMultiViewSampler):
+    """Multi-view flow matching using Heun's method (2nd-order Runge-Kutta)."""
+    @torch.no_grad()
+    def sample_once(
+        self, model, x_t, t: float, t_prev: float, 
+        conds: Dict[str, Any], views: List[str], 
+        front_axis: str = 'z', blend_temperature: float = 2.0, **kwargs
+    ):
+        dt = t_prev - t
+        is_sparse = hasattr(x_t, 'coords')
+        
+        # Calculate spatial blending weights ONCE for the current step
+        if is_sparse:
+            weights = self._compute_view_weights_sparse(x_t.coords, views, front_axis, blend_temperature)
+        else:
+            weights = self._compute_view_weights_dense(x_t.shape, x_t.device, views, front_axis, blend_temperature)
+            
+        # Helper function to compute the blended velocity for a given intermediate x and t
+        def get_blended_v(current_x, current_t):
+            pred_v_accum = 0
+            for i, view in enumerate(views):
+                cond = conds[view]
+                if isinstance(cond, dict) and 'cond' in cond and 'neg_cond' in cond:
+                    pred_v_view = self._inference_model(model, current_x, current_t, cond=cond['cond'], neg_cond=cond['neg_cond'], **kwargs)
+                else:
+                    pred_v_view = self._inference_model(model, current_x, current_t, cond=cond, **kwargs)
+                
+                if is_sparse:
+                    w = weights[:, i].unsqueeze(1)
+                    v_feats = pred_v_view.feats if hasattr(pred_v_view, 'feats') else pred_v_view
+                    pred_v_accum += v_feats * w
+                else:
+                    w = weights[i].unsqueeze(0).unsqueeze(0)
+                    pred_v_accum += pred_v_view * w
+                    
+            if is_sparse:
+                return current_x.replace(feats=pred_v_accum)
+            else:
+                return pred_v_accum
+
+        # Heun's Method (RK2) Evaluations
+        # Step 1: Predictor (Euler step)
+        k1 = get_blended_v(x_t, t)
+        x_temp = x_t + k1 * dt
+        
+        # Step 2: Corrector
+        k2 = get_blended_v(x_temp, t + dt)
+        
+        # Combine
+        pred_x_prev = x_t + 0.5 * dt * (k1 + k2)
+        
+        # Estimate x_0 based on k1 for tracking
+        pred_x_0, _ = self._v_to_xstart_eps(x_t=x_t, t=t, v=k1)
+        
+        return edict({"pred_x_prev": pred_x_prev, "pred_x_0": pred_x_0})
+
+# --- CFG Wrapper for Heun Multi-View ---
+class FlowHeunMultiViewGuidanceIntervalSampler(GuidanceIntervalSamplerMixin, ClassifierFreeGuidanceSamplerMixin, FlowHeunMultiViewSampler):
+    pass
+
