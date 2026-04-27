@@ -1953,6 +1953,7 @@ class Trellis2_GGUFPostProcessAndUnWrapAndRasterizer:
         rast = torch.zeros((1, texture_size, texture_size, 4), device='cuda', dtype=torch.float32)
         
         # Rasterize in chunks to save memory
+        out_faces_int32 = out_faces.to(torch.int32)
         for i in range(0, out_faces_int32.shape[0], 100000):
             rast_chunk, _ = dr.rasterize(
                 ctx, uvs_rast, out_faces_int32[i:i+100000],
