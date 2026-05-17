@@ -275,6 +275,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         pipeline.sdnq_use_quantized_matmul = sdnq_use_quantized_matmul
         pipeline.sdnq_torch_compile = sdnq_torch_compile
         pipeline.sdnq_svd_rank = sdnq_svd_rank
+        pipeline.isPixal3D = False
 
         pipeline._pretrained_args['models']['sparse_structure_decoder'] = os.path.join(folder_paths.models_dir,"Trellis2","decoders","Stage1","ss_dec_conv3d_16l8_fp16")
         # Check both the new consolidated location and the old legacy location for DINOv3
