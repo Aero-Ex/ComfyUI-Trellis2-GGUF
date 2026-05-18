@@ -1,10 +1,9 @@
 from typing import *
 import torch
 import torch.nn as nn
-from ..attention import MultiHeadAttention
+from ..attention import MultiHeadAttention, ProjectAttention, GatedProjectAttention
 from ..norm import LayerNorm32
 from .blocks import FeedForwardNet
-
 
 class ModulatedTransformerBlock(nn.Module):
     """
@@ -55,7 +54,7 @@ class ModulatedTransformerBlock(nn.Module):
 
     def _forward(self, x: torch.Tensor, mod: torch.Tensor, phases: Optional[torch.Tensor] = None) -> torch.Tensor:
         if self.share_mod:
-            shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (self.modulation + mod).type(mod.dtype).chunk(6, dim=1)
+            shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (self.modulation.to(mod.dtype) + mod).chunk(6, dim=1)
         else:
             shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(mod).chunk(6, dim=1)
         h = self.norm1(x)
@@ -97,6 +96,9 @@ class ModulatedTransformerCrossBlock(nn.Module):
         qk_rms_norm_cross: bool = False,
         qkv_bias: bool = True,
         share_mod: bool = False,
+        image_attn_mode: Literal["cross", "proj", "gated_proj"] = "cross",
+        proj_in_channels: Optional[int] = None,
+        vae_in_channels: Optional[int] = None,        
     ):
         super().__init__()
         self.use_checkpoint = use_checkpoint
@@ -116,15 +118,46 @@ class ModulatedTransformerCrossBlock(nn.Module):
             rope_freq=rope_freq,
             qk_rms_norm=qk_rms_norm,
         )
-        self.cross_attn = MultiHeadAttention(
-            channels,
-            ctx_channels=ctx_channels,
-            num_heads=num_heads,
-            type="cross",
-            attn_mode="full",
-            qkv_bias=qkv_bias,
-            qk_rms_norm=qk_rms_norm_cross,
-        )
+        
+        # Build cross attention based on mode
+        if image_attn_mode == "cross":
+            self.cross_attn = MultiHeadAttention(
+                channels,
+                ctx_channels=ctx_channels,
+                num_heads=num_heads,
+                type="cross",
+                attn_mode="full",
+                qkv_bias=qkv_bias,
+                qk_rms_norm=qk_rms_norm_cross,
+            )
+        elif image_attn_mode == "proj":
+            _proj_in = proj_in_channels if proj_in_channels is not None else ctx_channels
+            cross_attn_block = MultiHeadAttention(
+                channels,
+                ctx_channels=ctx_channels,
+                num_heads=num_heads,
+                type="cross",
+                attn_mode="full",
+                qkv_bias=qkv_bias,
+                qk_rms_norm=qk_rms_norm_cross,
+            )
+            self.cross_attn = ProjectAttention(cross_attn_block, channels, _proj_in)
+        elif image_attn_mode == "gated_proj":
+            _dino_in = proj_in_channels if proj_in_channels is not None else ctx_channels
+            _vae_in = vae_in_channels if vae_in_channels is not None else 16
+            cross_attn_block = MultiHeadAttention(
+                channels,
+                ctx_channels=ctx_channels,
+                num_heads=num_heads,
+                type="cross",
+                attn_mode="full",
+                qkv_bias=qkv_bias,
+                qk_rms_norm=qk_rms_norm_cross,
+            )
+            self.cross_attn = GatedProjectAttention(cross_attn_block, channels, _dino_in, _vae_in)
+        else:
+            raise ValueError(f"Unknown image attention mode: {image_attn_mode}")        
+        
         self.mlp = FeedForwardNet(
             channels,
             mlp_ratio=mlp_ratio,
@@ -139,7 +172,7 @@ class ModulatedTransformerCrossBlock(nn.Module):
 
     def _forward(self, x: torch.Tensor, mod: torch.Tensor, context: torch.Tensor, phases: Optional[torch.Tensor] = None) -> torch.Tensor:
         if self.share_mod:
-            shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (self.modulation + mod).type(mod.dtype).chunk(6, dim=1)
+            shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (self.modulation.to(mod.dtype) + mod).chunk(6, dim=1)
         else:
             shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(mod).chunk(6, dim=1)
         h = self.norm1(x)
@@ -163,3 +196,72 @@ class ModulatedTransformerCrossBlock(nn.Module):
         else:
             return self._forward(x, mod, context, phases)
         
+class ModulatedTransformerCrossBlock_woT(nn.Module):
+    """
+    Transformer cross-attention block (MSA + MCA + FFN) with adaptive layer norm conditioning.
+    """
+    def __init__(
+        self,
+        channels: int,
+        ctx_channels: int,
+        num_heads: int,
+        mlp_ratio: float = 4.0,
+        attn_mode: Literal["full", "windowed"] = "full",
+        window_size: Optional[int] = None,
+        shift_window: Optional[Tuple[int, int, int]] = None,
+        use_checkpoint: bool = False,
+        use_rope: bool = False,
+        qk_rms_norm: bool = False,
+        qk_rms_norm_cross: bool = False,
+        qkv_bias: bool = True,
+        share_mod: bool = False,
+    ):
+        super().__init__()
+        self.use_checkpoint = use_checkpoint
+        self.share_mod = share_mod
+        self.norm1 = LayerNorm32(channels, elementwise_affine=False, eps=1e-6)
+        self.norm2 = LayerNorm32(channels, elementwise_affine=True, eps=1e-6)
+        self.norm3 = LayerNorm32(channels, elementwise_affine=False, eps=1e-6)
+        self.self_attn = MultiHeadAttention(
+            channels,
+            num_heads=num_heads,
+            type="self",
+            attn_mode=attn_mode,
+            window_size=window_size,
+            shift_window=shift_window,
+            qkv_bias=qkv_bias,
+            use_rope=use_rope,
+            qk_rms_norm=qk_rms_norm,
+        )
+        self.cross_attn = MultiHeadAttention(
+            channels,
+            ctx_channels=ctx_channels,
+            num_heads=num_heads,
+            type="cross",
+            attn_mode="full",
+            qkv_bias=qkv_bias,
+            qk_rms_norm=qk_rms_norm_cross,
+        )
+        self.mlp = FeedForwardNet(
+            channels,
+            mlp_ratio=mlp_ratio,
+        )
+
+    def _forward(self, x: torch.Tensor, context: torch.Tensor):
+
+        h = self.norm1(x)
+        h = self.self_attn(h)
+        x = x + h
+        h = self.norm2(x)
+        h = self.cross_attn(h, context)
+        x = x + h
+        h = self.norm3(x)
+        h = self.mlp(h)
+        x = x + h
+        return x
+
+    def forward(self, x: torch.Tensor, context: torch.Tensor):
+        if self.use_checkpoint:
+            return torch.utils.checkpoint.checkpoint(self._forward, x, context, use_reentrant=False)
+        else:
+            return self._forward(x, context)        

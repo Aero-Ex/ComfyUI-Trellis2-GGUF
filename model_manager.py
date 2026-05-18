@@ -47,17 +47,38 @@ EXTRA_MODELS = [
 ENC_DEC_PREFIXES = ("ss_dec_", "shape_dec_", "tex_dec_", "shape_enc_", "tex_enc_")
 
 
-def get_models_dir() -> str:
-    """Absolute path to models/Trellis2."""
-    return os.path.join(folder_paths.models_dir, "Trellis2")
+CURRENT_MODELNAME = "Trellis2"
 
+def get_models_dir() -> str:
+    """Absolute path to models directory."""
+    dir_name = "Trellis2"
+    if CURRENT_MODELNAME == "Pixal3D-GGUF":
+        dir_name = "Pixal3D-GGUF"
+    return os.path.join(folder_paths.models_dir, dir_name)
+
+
+PIXAL3D_REPO_PATH_MAP = {
+    "ss_dec_":                 "decoder/",
+    "shape_dec_":              "decoder/",
+    "tex_dec_":                "decoder/",
+    "ss_flow_":                "Sparse/",
+    "slat_flow_img2shape_":    "shape/",
+    "slat_flow_imgshape2tex_": "texture/",
+    "shape_enc_":              "encoders/",
+    "tex_enc_":                "encoders/",
+}
 
 def remote_path(basename: str, suffix: str) -> str:
-    """Map a model basename to its path inside the Aero-Ex HF repo."""
+    """Map a model basename to its path inside the HF repo."""
     if suffix.endswith(".gguf"):
         suffix = suffix.replace("_Q5_K.gguf", "_Q5_K_M.gguf")
         suffix = suffix.replace("_Q4_K.gguf", "_Q4_K_M.gguf")
-    for prefix, folder in REPO_PATH_MAP.items():
+        if suffix == "_BF16.gguf":
+            suffix = ".gguf"  # BF16 ggufs don't have the _BF16 suffix appended
+
+    path_map = PIXAL3D_REPO_PATH_MAP if CURRENT_MODELNAME == "Pixal3D-GGUF" else REPO_PATH_MAP
+
+    for prefix, folder in path_map.items():
         if basename.startswith(prefix):
             return f"{folder}{basename}{suffix}"
     return f"{basename}{suffix}"
@@ -147,6 +168,7 @@ def resolve_local_path(basename: str, enable_gguf: bool = False, gguf_quant: str
 def ensure_model_files(
     model_format: str,
     pipeline_config: dict,
+    gguf_repo: str = GGUF_REPO,
 ) -> dict:
     """
     Download all required model files if not present locally.
@@ -223,7 +245,8 @@ def ensure_model_files(
     dinov3_new  = os.path.join(root, "dinov3", "facebook", "dinov3-vitl16-pretrain-lvd1689m", "model.safetensors")
     dinov3_old  = os.path.join(folder_paths.models_dir, "Aero-Ex", "Dinov3", "facebook",
                                "dinov3-vitl16-pretrain-lvd1689m", "model.safetensors")
-    if not os.path.exists(dinov3_new) and not os.path.exists(dinov3_old):
+    dinov3_user = os.path.join(folder_paths.models_dir, "facebook", "dinov3-vitl16-pretrain-lvd1689m", "model.safetensors")
+    if not os.path.exists(dinov3_new) and not os.path.exists(dinov3_old) and not os.path.exists(dinov3_user):
         print(f"[ModelManager] Downloading DINOv3 from {DINOV3_REPO}...")
         dinov3_dir = os.path.join(root, "dinov3")
         for fn in ["config.json", "model.safetensors", "preprocessor_config.json"]:
@@ -311,9 +334,13 @@ def ensure_model_files(
 
             # Need to download
             hf_filename = remote_path(basename, sfx)
-            print(f"[ModelManager] Downloading {hf_filename} from {GGUF_REPO}...")
+            download_repo = gguf_repo
+            if CURRENT_MODELNAME == "Pixal3D-GGUF" and basename.startswith(("shape_enc_", "tex_enc_")):
+                download_repo = GGUF_REPO
+
+            print(f"[ModelManager] Downloading {hf_filename} from {download_repo}...")
             try:
-                hf_hub_download(repo_id=GGUF_REPO, filename=hf_filename, local_dir=root)
+                hf_hub_download(repo_id=download_repo, filename=hf_filename, local_dir=root)
             except Exception as e:
                 print(f"[ModelManager] ⚠ Failed to download {hf_filename}: {e}")
 

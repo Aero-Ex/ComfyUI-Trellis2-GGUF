@@ -17,7 +17,7 @@ from typing import Dict, Any, Tuple, Optional, List
 _GGUF_STRATEGY_LOGGED = False
 
 def _setup_native_gguf():
-    global GGMLTensor, GGMLLayer, _native_dequantize_tensor, is_quantized, HAS_GGUF_OPS, get_orig_shape
+    global GGMLTensor, GGMLLayer, GGMLOps, _native_dequantize_tensor, is_quantized, HAS_GGUF_OPS, get_orig_shape
 
     # Try local import first (in case it's in sys.path)
     try:
@@ -26,7 +26,6 @@ def _setup_native_gguf():
         local_dequant = None
 
     # Check for ComfyUI-GGUF in custom_nodes.
-    # This file lives at:  custom_nodes/ComfyUI-Trellis2/trellis2/utils/gguf_utils.py
     # Three levels up reaches custom_nodes/.
     custom_nodes_path = os.path.abspath(
         os.path.join(os.path.dirname(__file__), "..", "..", "..")
@@ -56,6 +55,7 @@ def _setup_native_gguf():
 
         GGMLTensor = gguf_ops.GGMLTensor
         GGMLLayer = gguf_ops.GGMLLayer
+        GGMLOps = gguf_ops.GGMLOps
         _native_dequantize_tensor = gguf_dequant.dequantize_tensor
         is_quantized = gguf_dequant.is_quantized
         get_orig_shape = gguf_loader.get_orig_shape
@@ -640,6 +640,25 @@ def get_orig_shape(reader, tensor_name):
 _setup_native_gguf()
 HAS_GGUF_OPS = True
 
+if 'GGMLOps' not in globals() or GGMLOps is None:
+    class GGMLOpsFallback:
+        class Linear(torch.nn.Module):
+            def __init__(self, *args, **kwargs):
+                super().__init__()
+        class Conv2d(torch.nn.Module):
+            def __init__(self, *args, **kwargs):
+                super().__init__()
+        class LayerNorm(torch.nn.Module):
+            def __init__(self, *args, **kwargs):
+                super().__init__()
+        class GroupNorm(torch.nn.Module):
+            def __init__(self, *args, **kwargs):
+                super().__init__()
+        class Embedding(torch.nn.Module):
+            def __init__(self, *args, **kwargs):
+                super().__init__()
+    GGMLOps = GGMLOpsFallback
+
 
 # ── Key-remapping for GGUF files exported with Flux wrapper ──────────────────
 
@@ -767,12 +786,66 @@ def load_gguf_checkpoint(path):
 
 # ── Custom GGML replacement layers ───────────────────────────────────────────
 
-class GGMLSparseLinear(GGMLLayer):
+def chunked_apply_fn(fn, x: torch.Tensor, chunk_size: int) -> torch.Tensor:
+    if chunk_size <= 0 or x.shape[0] <= chunk_size:
+        return fn(x)
+    out_0 = fn(x[0:chunk_size])
+    out_shape = (x.shape[0],) + out_0.shape[1:]
+    out = torch.empty(out_shape, device=x.device, dtype=out_0.dtype)
+    out[0:chunk_size] = out_0
+    for i in range(chunk_size, x.shape[0], chunk_size):
+        out[i:i+chunk_size] = fn(x[i:i+chunk_size])
+    return out
+
+
+def chunked_apply_linear(weight, bias, x: torch.Tensor, chunk_size: int) -> torch.Tensor:
+    def fn(chunk):
+        return torch.nn.functional.linear(chunk, weight, bias)
+    return chunked_apply_fn(fn, x, chunk_size)
+
+
+class GGMLSparseLinear(GGMLOps.Linear):
     """Drop-in for nn.Linear that dequantizes GGML weights on each forward."""
 
-    def forward(self, input):
-        weight, bias = self.cast_bias_weight(input)
-        return torch.nn.functional.linear(input, weight, bias)
+    def __init__(self, in_features, out_features, bias=True, device=None, dtype=None):
+        super().__init__(in_features, out_features, bias=bias, device=device, dtype=dtype)
+        self.low_vram = False
+        self.chunk_size = 65536
+
+    def forward_ggml_cast_weights(self, input):
+        is_sparse_type = (
+            input.__class__.__name__ in ("VarLenTensor", "SparseTensor")
+            or hasattr(input, "feats")
+        )
+        if is_sparse_type:
+            weight, bias = self.cast_bias_weight(input.feats)
+            if self.low_vram:
+                return input.replace(chunked_apply_linear(weight, bias, input.feats, self.chunk_size))
+            return input.replace(torch.nn.functional.linear(input.feats, weight, bias))
+        else:
+            weight, bias = self.cast_bias_weight(input)
+            return torch.nn.functional.linear(input, weight, bias)
+
+    def forward_comfy_cast_weights(self, input, *args, **kwargs):
+        is_sparse_type = (
+            input.__class__.__name__ in ("VarLenTensor", "SparseTensor")
+            or hasattr(input, "feats")
+        )
+        if is_sparse_type:
+            if self.is_ggml_quantized():
+                return self.forward_ggml_cast_weights(input)
+            
+            # Unquantized fallback path
+            if self.low_vram:
+                def standard_linear_fn(x):
+                    return super(GGMLSparseLinear, self).forward_comfy_cast_weights(x, *args, **kwargs)
+                out_feats = chunked_apply_fn(standard_linear_fn, input.feats, self.chunk_size)
+            else:
+                out_feats = super().forward_comfy_cast_weights(input.feats, *args, **kwargs)
+            return input.replace(out_feats)
+        else:
+            return super().forward_comfy_cast_weights(input, *args, **kwargs)
+
 
 
 class GGMLMultiHeadRMSNorm(GGMLLayer):
@@ -841,11 +914,10 @@ def convert_to_ggml(module):
     """Recursively replace standard layers with GGML-capable equivalents.
 
     Skips:
-    - ``SparseLinear`` — already inherits ``GGMLLayer`` directly.
     - VAE / Encoder / Decoder / Dino models — never GGUF-quantised.
 
     Replaces:
-    - ``nn.Linear``                              → GGMLSparseLinear
+    - ``nn.Linear`` / ``SparseLinear``            → GGMLSparseLinear
     - ``MultiHeadRMSNorm`` / ``SparseMultiHeadRMSNorm`` → GGMLMultiHeadRMSNorm
     - ``GroupNorm32`` / ``SparseGroupNorm32`` / ``nn.GroupNorm``  → GGMLGroupNorm32
     - ``LayerNorm32`` / ``SparseLayerNorm32`` / ``nn.LayerNorm``  → GGMLLayerNorm32
@@ -864,15 +936,8 @@ def convert_to_ggml(module):
 
         new_layer = None
 
-        if child_class_name == "SparseLinear":
-            # Already a GGMLLayer — no replacement needed
-            continue
-
-        elif isinstance(child, torch.nn.Linear):
-            new_layer = GGMLSparseLinear()
-            for attr in ("in_features", "out_features"):
-                if hasattr(child, attr):
-                    setattr(new_layer, attr, getattr(child, attr))
+        if child_class_name == "SparseLinear" or isinstance(child, torch.nn.Linear):
+            new_layer = GGMLSparseLinear(child.in_features, child.out_features, bias=(child.bias is not None))
 
         elif child_class_name in ("MultiHeadRMSNorm", "SparseMultiHeadRMSNorm"):
             # Guard on gamma (not weight — these layers have no weight param)

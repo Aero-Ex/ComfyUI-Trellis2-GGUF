@@ -31,6 +31,7 @@ class FlexiDualGridVaeEncoder(SparseUnetVaeEncoder):
         down_block_type: List[str],
         block_args: List[Dict[str, Any]],
         use_fp16: bool = False,
+        use_fp8: bool = False,
     ):
         super().__init__(
             6,
@@ -41,15 +42,15 @@ class FlexiDualGridVaeEncoder(SparseUnetVaeEncoder):
             down_block_type,
             block_args,
             use_fp16,
+            use_fp8,
         )
         
-    def forward(self, vertices: sp.SparseTensor, intersected: sp.SparseTensor, sample_posterior=False, return_raw=False, use_tiled=False, tile_size=128, overlap=24):
-        half = torch.tensor(0.5, dtype=vertices.feats.dtype, device=vertices.device)
+    def forward(self, vertices: sp.SparseTensor, intersected: sp.SparseTensor, sample_posterior=False, return_raw=False):
         x = vertices.replace(torch.cat([
-            vertices.feats - half,
-            intersected.feats.to(vertices.feats.dtype) - half,
+            vertices.feats - 0.5,
+            intersected.feats.float() - 0.5,
         ], dim=1))
-        return super().forward(x, sample_posterior, return_raw, use_tiled=use_tiled, tile_size=tile_size, overlap=overlap)
+        return super().forward(x, sample_posterior, return_raw)
     
     
 class FlexiDualGridVaeDecoder(SparseUnetVaeDecoder):
@@ -64,6 +65,7 @@ class FlexiDualGridVaeDecoder(SparseUnetVaeDecoder):
         block_args: List[Dict[str, Any]],
         voxel_margin: float = 0.5,
         use_fp16: bool = False,
+        use_fp8: bool = False,
     ):
         self.resolution = resolution
         self.voxel_margin = voxel_margin
@@ -76,7 +78,8 @@ class FlexiDualGridVaeDecoder(SparseUnetVaeDecoder):
             block_type,
             up_block_type,
             block_args,
-            use_fp16,
+            use_fp16=use_fp16,
+            use_fp8=use_fp8,
         )
 
     def set_resolution(self, resolution: int) -> None:

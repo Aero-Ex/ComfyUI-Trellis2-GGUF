@@ -28,7 +28,9 @@ class LayerNorm32(nn.LayerNorm):
     def _forward(self, x: torch.Tensor) -> torch.Tensor:
         x_dtype = x.dtype
         x = manual_cast(x, torch.float32)
-        o = super().forward(x)
+        weight = manual_cast(self.weight, torch.float32) if self.weight is not None else None
+        bias = manual_cast(self.bias, torch.float32) if self.bias is not None else None
+        o = torch.nn.functional.layer_norm(x, self.normalized_shape, weight, bias, self.eps)
         return manual_cast(o, x_dtype)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -49,7 +51,9 @@ class GroupNorm32(nn.GroupNorm):
     def _forward(self, x: torch.Tensor) -> torch.Tensor:
         x_dtype = x.dtype
         x = manual_cast(x, torch.float32)
-        o = super().forward(x)
+        weight = manual_cast(self.weight, torch.float32) if self.weight is not None else None
+        bias = manual_cast(self.bias, torch.float32) if self.bias is not None else None
+        o = torch.nn.functional.group_norm(x, self.num_groups, weight, bias, self.eps)
         return manual_cast(o, x_dtype)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

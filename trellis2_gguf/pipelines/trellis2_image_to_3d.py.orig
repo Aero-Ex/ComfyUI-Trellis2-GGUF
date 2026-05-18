@@ -501,117 +501,18 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         cam_angle = torch.tensor([camera_angle_x], device=device)
         dist_tensor = torch.tensor([distance], device=device)
         scale_tensor = torch.tensor([mesh_scale], device=device)
-        # monkeypatch the forward of this specific image_cond_model instance
-        # or its class if it hasn't been monkeypatched yet!
-        if not hasattr(image_cond_model, '_monkeypatched_for_cpu'):
-            original_forward = image_cond_model.forward.__func__ if hasattr(image_cond_model.forward, '__func__') else image_cond_model.forward
-            
-            def optimized_forward_instance(self_instance, image, camera_angle_x=None, distance=None, mesh_scale=None, transform_matrix=None):
-                if self_instance.grid_resolution < 32:
-                    return original_forward(self_instance, image, camera_angle_x, distance, mesh_scale, transform_matrix)
-                
-                import torch
-                import numpy as np
-                from PIL import Image
-
-                if isinstance(image, torch.Tensor):
-                    assert image.ndim == 4, "Image tensor should be batched (B, C, H, W)"
-                elif isinstance(image, list):
-                    assert all(isinstance(i, Image.Image) for i in image), "Image list should be list of PIL images"
-                    image = [i.resize((self_instance.image_size, self_instance.image_size), Image.LANCZOS) for i in image]
-                    image = [np.array(i.convert('RGB')).astype(np.float32) / 255 for i in image]
-                    image = [torch.from_numpy(i).permute(2, 0, 1).float() for i in image]
-                    image = torch.stack(image).cuda()
-                else:
-                    raise ValueError(f"Unsupported type of image: {type(image)}")
-                
-                B = image.shape[0]
-                
-                if self_instance.use_naf_upsample:
-                    image_for_naf = image.clone()
-                
-                image = self_instance.transform(image)
-                
-                with torch.no_grad():
-                    z = self_instance.extract_features(image)
-                    
-                    z_clstoken = z[:, 0:1]
-                    num_reg = getattr(self_instance.model.config, 'num_register_tokens', 4)
-                    z_regtokens = z[:, 1:1+num_reg]
-                    z_patchtokens = z[:, 1+num_reg:]
-                    
-                    z_patchtokens_spatial = z_patchtokens.reshape(
-                        B, self_instance.patch_number, self_instance.patch_number, -1
-                    )
-                    
-                    if camera_angle_x is None or distance is None or mesh_scale is None:
-                        raise ValueError("camera_angle_x, distance, and mesh_scale must be provided")
-                    
-                    z_proj_lr = self_instance.proj_grid(
-                        z_patchtokens_spatial, 
-                        camera_angle_x, 
-                        distance, 
-                        mesh_scale,
-                        transform_matrix
-                    )
-                    
-                    if self_instance.use_naf_upsample:
-                        self_instance._load_naf()
-                        lr_features_bchw = z_patchtokens_spatial.permute(0, 3, 1, 2)
-
-                        K = getattr(self_instance, 'naf_tile_factor', 1) or 1
-                        if K <= 1:
-                            hr_features = self_instance.naf_model(
-                                image_for_naf, lr_features_bchw, self_instance.naf_target_size
-                            )
-                            z_proj_hr = self_instance.proj_grid(
-                                hr_features,
-                                camera_angle_x,
-                                distance,
-                                mesh_scale,
-                                transform_matrix,
-                                BHWC=False
-                            )
-                            del hr_features
-                        else:
-                            z_proj_hr = self_instance._proj_naf_tiled(
-                                image_for_naf, lr_features_bchw,
-                                camera_angle_x, distance, mesh_scale, transform_matrix,
-                                tile_factor=int(K),
-                            )
-
-                        z_proj_lr_cpu = z_proj_lr.cpu()
-                        z_proj_hr_cpu = z_proj_hr.cpu()
-                        del z_proj_lr, z_proj_hr
-                        torch.cuda.empty_cache()
-                        z_proj = torch.cat([z_proj_lr_cpu, z_proj_hr_cpu], dim=-1)
-                    else:
-                        z_proj = z_proj_lr.cpu()
-                        del z_proj_lr
-                        torch.cuda.empty_cache()
-                    
-                    global_features = torch.cat([z_clstoken, z_regtokens], dim=1)
-                    return global_features, z_proj
-
-            import types
-            image_cond_model.forward = types.MethodType(optimized_forward_instance, image_cond_model)
-            image_cond_model._monkeypatched_for_cpu = True
-            print("[Trellis2-GGUF] Successfully applied instance monkeypatch to image_cond_model!")
-
         with hide_src_module():
             z_global, z_proj = image_cond_model(
                 image, camera_angle_x=cam_angle, distance=dist_tensor, mesh_scale=scale_tensor,
             )
         grid_res = image_cond_model.grid_resolution
         z_proj_grid = z_proj.reshape(B, grid_res, grid_res, grid_res, -1)
-        batch_indices = coords[:, 0].long().to(z_proj.device)
-        x_coords = coords[:, 1].long().to(z_proj.device)
-        y_coords = coords[:, 2].long().to(z_proj.device)
-        z_coords = coords[:, 3].long().to(z_proj.device)
-        z_proj_sparse = z_proj_grid[batch_indices, x_coords, y_coords, z_coords].to(device)
+        batch_indices = coords[:, 0].long()
+        x_coords = coords[:, 1].long()
+        y_coords = coords[:, 2].long()
+        z_coords = coords[:, 3].long()
+        z_proj_sparse = z_proj_grid[batch_indices, x_coords, y_coords, z_coords]
         z_proj_st = SparseTensor(feats=z_proj_sparse, coords=coords)
-        del z_proj_grid, z_proj
-        torch.cuda.empty_cache()
 
         if grid_resolution_override is not None and grid_resolution_override != orig_grid_res:
             image_cond_model.grid_resolution = orig_grid_res
@@ -1042,14 +943,6 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         if self.low_vram:
             cond = self._cond_to(cond, self.device)                         
         # Sample sparse structure latent
-        
-        if isinstance(cond, dict) and 'cond' in cond:
-            c = cond['cond']
-            if isinstance(c, dict):
-                print("COND global:", c['global'].abs().mean().item(), "proj:", c['proj'].abs().mean().item())
-            else:
-                print("COND:", c.abs().mean().item())
-
         flow_model = self.models['sparse_structure_flow_model']
         reso = flow_model.resolution
         in_channels = flow_model.in_channels
@@ -1059,17 +952,6 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             flow_model.to(self.device)
         
         active_sampler = self._get_sampler(sampler, self.sparse_structure_sampler)
-        # Debug: log conditioning shapes and stats
-        _c = cond.get('cond', cond)
-        if isinstance(_c, dict):
-            for k, v in _c.items():
-                if isinstance(v, torch.Tensor):
-                    print(f"  [SS cond '{k}'] shape={v.shape}, dtype={v.dtype}, mean={v.float().mean():.4f}, std={v.float().std():.4f}")
-        _nc = cond.get('neg_cond', None)
-        if _nc is not None and isinstance(_nc, dict):
-            for k, v in _nc.items():
-                if isinstance(v, torch.Tensor):
-                    print(f"  [SS neg_cond '{k}'] shape={v.shape}, dtype={v.dtype}, mean={v.float().mean():.4f}")
         z_s = active_sampler.sample(
             flow_model,
             noise,
@@ -2401,10 +2283,6 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         sparse_structure_resolution: int = 32,
         low_res_sampler_name: str = 'euler',
         high_res_sampler_name: str = 'euler',
-        verbose: bool = False,
-        dino_lock: float = 0.0,
-        dino_substeps: int = 4,
-        dino_foundation_cap: float = 0.92
     ) -> SparseTensor:
         """
         Sample structured latent with the given conditioning.
@@ -2541,10 +2419,6 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         shape_slat: SparseTensor,
         sampler_params: dict = {},
         sampler_name: str = 'euler',
-        verbose: bool = False,
-        dino_lock: float = 0.0,
-        dino_substeps: int = 4,
-        dino_foundation_cap: float = 0.92
     ) -> SparseTensor:
         """
         Sample structured latent with the given conditioning.

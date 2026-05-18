@@ -348,15 +348,14 @@ class Trellis2_GGUFLoadModel:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "modelname": (["TRELLIS.2-4B"],),
+                "modelname": (["TRELLIS.2-4B", "Pixal3D-GGUF"],),
                 "model_format": ([
-                    "Safetensors (BF16)", 
-                    "Safetensors (FP8)", 
+                    "GGUF BF16",
                     "GGUF Q8_0", 
                     "GGUF Q6_K", 
                     "GGUF Q5_K_M", 
                     "GGUF Q4_K_M",
-                ], {"default": "Safetensors (BF16)"}),
+                ], {"default": "GGUF Q8_0"}),
                 "backend": (["flash_attn", "xformers", "sdpa", "flash_attn_3"], {"default": "xformers"}),
                 "device": (["cpu","cuda"],{"default":"cuda"}),
                 "low_vram": ("BOOLEAN",{"default":True}),
@@ -392,21 +391,26 @@ class Trellis2_GGUFLoadModel:
             spec.loader.exec_module(_mm)
         model_manager = _sys.modules["trellis2_gguf_model_manager"]
 
+        model_manager.CURRENT_MODELNAME = modelname
         model_path = model_manager.get_models_dir()
+        
+        repo_id = model_manager.GGUF_REPO
+        if modelname == "Pixal3D-GGUF":
+            repo_id = "Aero-Ex/Pixal3D-GGUF"
 
         # Ensure pipeline.json exists first; read it, then delegate everything
         import json
         pipeline_json_local = os.path.join(model_path, "pipeline.json")
         if not os.path.exists(pipeline_json_local):
             from huggingface_hub import hf_hub_download
-            print(f"[Trellis2-GGUF] Downloading pipeline.json from {model_manager.GGUF_REPO}...")
-            hf_hub_download(repo_id=model_manager.GGUF_REPO, filename="pipeline.json", local_dir=model_path)
+            print(f"[Trellis2-GGUF] Downloading pipeline.json from {repo_id}...")
+            hf_hub_download(repo_id=repo_id, filename="pipeline.json", local_dir=model_path)
 
         with open(pipeline_json_local, 'r') as f:
             pipeline_config = json.load(f)
 
         # This is the ONLY place that downloads model files
-        model_manager.ensure_model_files(model_format, pipeline_config)
+        model_manager.ensure_model_files(model_format, pipeline_config, gguf_repo=repo_id)
 
         # ── Parse format for pipeline construction ────────────────────────
         enable_gguf = model_format.startswith("GGUF")
@@ -429,6 +433,10 @@ class Trellis2_GGUFLoadModel:
             _torch.backends.cudnn.allow_tf32 = True
             _torch.set_float32_matmul_precision('high')
 
+        isPixal3D = False
+        if modelname == "Pixal3D-GGUF":
+            isPixal3D = True
+
         pipeline = Trellis2ImageTo3DPipeline.from_pretrained(
             model_path,
             keep_models_loaded=keep_models_loaded,
@@ -439,6 +447,7 @@ class Trellis2_GGUFLoadModel:
             sdnq_use_quantized_matmul=sdnq_use_quantized_matmul,
             sdnq_torch_compile=sdnq_torch_compile,
             sdnq_svd_rank=sdnq_svd_rank,
+            isPixal3D=isPixal3D,
         )
 
         pipeline.low_vram = low_vram
@@ -459,7 +468,7 @@ class Trellis2_SDNQLoadModel(Trellis2_GGUFLoadModel):
     def INPUT_TYPES(s):
         return {
             "required": {
-                "modelname": (["TRELLIS.2-4B"],),
+                "modelname": (["TRELLIS.2-4B", "Pixal3D-GGUF"],),
                 "model_format": ([
                     "sdnq_int8_svd32",
                     "sdnq_int8_svd64",

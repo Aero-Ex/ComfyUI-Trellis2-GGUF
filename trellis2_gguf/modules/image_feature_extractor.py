@@ -60,7 +60,7 @@ class DinoV3FeatureExtractor:
     """
     Feature extractor for DINOv3 models.
     """
-    def __init__(self, model_name: str, image_size=512):
+    def __init__(self, model_name: str, image_size=2048):
         self.model_name = model_name
         self.model = DINOv3ViTModel.from_pretrained(model_name)
         self.model.eval()
@@ -83,11 +83,21 @@ class DinoV3FeatureExtractor:
         hidden_states = self.model.embeddings(image, bool_masked_pos=None)
         position_embeddings = self.model.rope_embeddings(image)
 
-        for i, layer_module in enumerate(self.model.layer):
-            hidden_states = layer_module(
-                hidden_states,
-                position_embeddings=position_embeddings,
-            )
+        # transformers < 5
+        if hasattr(self.model,'layer'):
+            for i, layer_module in enumerate(self.model.layer):
+                hidden_states = layer_module(
+                    hidden_states,
+                    position_embeddings=position_embeddings,
+                )
+        elif hasattr(self.model,'model') and hasattr(self.model.model,'layer'): # transformers >= 5
+            for i, layer_module in enumerate(self.model.model.layer):
+                hidden_states = layer_module(
+                    hidden_states,
+                    position_embeddings=position_embeddings,
+                )
+        else:
+            raise Exception("Cannot extract features")
 
         return F.layer_norm(hidden_states, hidden_states.shape[-1:])
         
@@ -106,6 +116,12 @@ class DinoV3FeatureExtractor:
             assert image.ndim == 4, "Image tensor should be batched (B, C, H, W)"
         elif isinstance(image, list):
             assert all(isinstance(i, Image.Image) for i in image), "Image list should be list of PIL images"
+            # We resize the images only if they are bigger than self.image_size
+            # image = [
+                # i.resize((self.image_size, self.image_size), Image.LANCZOS) 
+                # if max(i.size) > self.image_size else i 
+                # for i in image
+            # ]            
             image = [i.resize((self.image_size, self.image_size), Image.LANCZOS) for i in image]
             image = [np.array(i.convert('RGB')).astype(np.float32) / 255 for i in image]
             image = [torch.from_numpy(i).permute(2, 0, 1).float() for i in image]

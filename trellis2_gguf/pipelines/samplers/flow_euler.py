@@ -117,11 +117,14 @@ class FlowEulerSampler(Sampler):
         t_seq = t_seq.tolist()
         t_pairs = list((t_seq[i], t_seq[i + 1]) for i in range(steps))
         ret = edict({"samples": None, "pred_x_t": [], "pred_x_0": []})
-        for t, t_prev in tqdm(t_pairs, desc=tqdm_desc, disable=not verbose):
+        for step_i, (t, t_prev) in enumerate(tqdm(t_pairs, desc=tqdm_desc, disable=not verbose)):
             out = self.sample_once(model, sample, t, t_prev, cond, **kwargs)
             sample = out.pred_x_prev
             ret.pred_x_t.append(out.pred_x_prev)
             ret.pred_x_0.append(out.pred_x_0)
+            if tqdm_desc == "Sampling sparse structure" and step_i % 4 == 0:
+                x0 = out.pred_x_0
+                print(f"  [SS step {step_i:2d}] t={t:.3f} pred_x0: mean={x0.mean():.4f}, std={x0.std():.4f}, max={x0.max():.4f}, min={x0.min():.4f}")
         ret.samples = sample
         return ret
 

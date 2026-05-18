@@ -8,6 +8,10 @@ from .windowed_attn import sparse_windowed_scaled_dot_product_self_attention
 from .rope import SparseRotaryPositionEmbedder
 
 
+def _is_varlen(x) -> bool:
+    return isinstance(x, VarLenTensor) or (x is not None and x.__class__.__name__ in ('VarLenTensor', 'SparseTensor'))
+
+
 class SparseMultiHeadRMSNorm(nn.Module):
     def __init__(self, dim: int, heads: int):
         super().__init__()
@@ -17,7 +21,7 @@ class SparseMultiHeadRMSNorm(nn.Module):
     def forward(self, x: Union[VarLenTensor, torch.Tensor]) -> Union[VarLenTensor, torch.Tensor]:
         x_type = x.dtype
         x = x.float()
-        if hasattr(x, 'feats'):
+        if _is_varlen(x):
             x = x.replace(F.normalize(x.feats, dim=-1) * self.gamma * self.scale)
         else:
             x = F.normalize(x, dim=-1) * self.gamma * self.scale
@@ -76,29 +80,25 @@ class SparseMultiHeadAttention(nn.Module):
 
     @staticmethod
     def _linear(module: nn.Linear, x: Union[VarLenTensor, torch.Tensor]) -> Union[VarLenTensor, torch.Tensor]:
-        if hasattr(x, 'feats'):
+        if _is_varlen(x):
             return x.replace(module(x.feats))
         else:
             return module(x)
 
     @staticmethod
     def _reshape_chs(x: Union[VarLenTensor, torch.Tensor], shape: Tuple[int, ...]) -> Union[VarLenTensor, torch.Tensor]:
-        if hasattr(x, 'feats'):
+        if _is_varlen(x):
             return x.reshape(*shape)
         else:
             return x.reshape(*x.shape[:2], *shape)
 
     def _fused_pre(self, x: Union[VarLenTensor, torch.Tensor], num_fused: int) -> Union[VarLenTensor, torch.Tensor]:
-        if hasattr(x, 'feats') and not hasattr(x, 'coords'):
-            # VarLenTensor
+        if _is_varlen(x):
             x_feats = x.feats.unsqueeze(0)
-            x_feats = x_feats.reshape(*x_feats.shape[:2], num_fused, self.num_heads, -1)
-            return x.replace(x_feats.squeeze(0))
-        elif hasattr(x, 'feats'):
-            # SparseTensor
-            return x.reshape(num_fused, self.num_heads, -1)
         else:
-            return x.reshape(*x.shape[:2], num_fused, self.num_heads, -1)
+            x_feats = x
+        x_feats = x_feats.reshape(*x_feats.shape[:2], num_fused, self.num_heads, -1)
+        return x.replace(x_feats.squeeze(0)) if _is_varlen(x) else x_feats
     
     def forward(self, x: SparseTensor, context: Optional[Union[VarLenTensor, torch.Tensor]] = None) -> SparseTensor:
         if self._type == "self":
