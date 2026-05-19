@@ -354,7 +354,7 @@ def from_pretrained(path: str, enable_gguf: bool = False, gguf_quant: str = "Q8_
 
     if is_gguf and hasattr(model, "rope_phases") and model.rope_phases is not None:
         try:
-            from trellis2_gguf.modules.attention.rope import RotaryPositionEmbedder
+            from ..modules.attention.rope import RotaryPositionEmbedder
             logger.info("Regenerating rope_phases for GGUF model to restore complex float32 positional embeddings...")
             pos_embedder = RotaryPositionEmbedder(model.model_channels // model.num_heads, 3)
             coords = torch.meshgrid(*[torch.arange(res, device=model.rope_phases.device) for res in [model.resolution] * 3], indexing='ij')
