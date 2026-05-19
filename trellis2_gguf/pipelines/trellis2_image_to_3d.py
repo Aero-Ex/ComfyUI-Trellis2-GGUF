@@ -408,7 +408,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
 
     def _get_build_pixal3d_image_cond_model(self):
         import sys
-        for name, module in sys.modules.items():
+        for name, module in list(sys.modules.items()):
             if name.startswith('torch.') or name.startswith('torchvision.'): continue
             try:
                 if hasattr(module, 'build_pixal3d_image_cond_model'):
