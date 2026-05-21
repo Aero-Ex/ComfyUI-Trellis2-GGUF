@@ -11,5 +11,5 @@ trimesh
 rectpack
 numpy
 sdnq
-utils3d
+git+https://github.com/EasternJournalist/utils3d.git
 transformers==5.2.0
