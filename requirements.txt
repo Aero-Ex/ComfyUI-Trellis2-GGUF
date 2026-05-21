@@ -11,4 +11,5 @@ trimesh
 rectpack
 numpy
 sdnq
+utils3d
 transformers==5.2.0
