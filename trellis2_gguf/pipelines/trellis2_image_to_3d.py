@@ -488,6 +488,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         device = self.device
         if self.low_vram:
             image_cond_model.to(device)
+            image_cond_model.naf_tile_factor = 4
 
         orig_grid_res = image_cond_model.grid_resolution
         if grid_resolution_override is not None and grid_resolution_override != orig_grid_res:
@@ -2798,12 +2799,25 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         if use_tiled_encoder:
             print(f"Encoding shape slat with tiles (size: {encoder_tile_size}, overlap: {encoder_overlap})...")
             
-        shape_slat = self.models['shape_slat_encoder'](
-            vertices, intersected, 
-            use_tiled=use_tiled_encoder, 
-            tile_size=encoder_tile_size, 
-            overlap=encoder_overlap
-        )
+        import inspect
+        encoder_forward = getattr(self.models['shape_slat_encoder'], 'forward', None)
+        has_use_tiled = False
+        if encoder_forward is not None:
+            try:
+                sig = inspect.signature(encoder_forward)
+                has_use_tiled = 'use_tiled' in sig.parameters
+            except Exception:
+                pass
+
+        if has_use_tiled:
+            shape_slat = self.models['shape_slat_encoder'](
+                vertices, intersected, 
+                use_tiled=use_tiled_encoder, 
+                tile_size=encoder_tile_size, 
+                overlap=encoder_overlap
+            )
+        else:
+            shape_slat = self.models['shape_slat_encoder'](vertices, intersected)
         
         if self.low_vram:
             self.models['shape_slat_encoder'].cpu()
