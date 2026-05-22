@@ -488,7 +488,6 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         device = self.device
         if self.low_vram:
             image_cond_model.to(device)
-            image_cond_model.naf_tile_factor = 4
 
         orig_grid_res = image_cond_model.grid_resolution
         if grid_resolution_override is not None and grid_resolution_override != orig_grid_res:
