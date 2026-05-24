@@ -486,10 +486,19 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         """
         print('Getting Projected Image Cond ...')
         device = self.device
-        if self.low_vram:
+        target_size = getattr(image_cond_model, 'naf_target_size', 512)
+        is_texture_stage = False
+        if isinstance(target_size, (list, tuple)):
+            is_texture_stage = any(x == 1024 for x in target_size)
+        else:
+            is_texture_stage = target_size == 1024
+
+        if self.low_vram and not is_texture_stage:
             image_cond_model.to(device)
             image_cond_model.naf_tile_factor = 4
         else:
+            if self.low_vram:
+                image_cond_model.to(device)
             image_cond_model.naf_tile_factor = 1
 
         orig_grid_res = image_cond_model.grid_resolution

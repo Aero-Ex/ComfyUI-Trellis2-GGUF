@@ -119,20 +119,36 @@ try:
 
     def optimized_get_proj_cond_shape(
         self,
+        image_cond_model,
         image,
         coords,
-        distance,
-        mesh_scale,
+        camera_angle_x=0.8575560450553894,
+        distance=2.0,
+        mesh_scale=1.0,
         grid_resolution_override=None,
     ):
         device = self.device
-        cam_angle = self.get_moge_camera_config(image)
-        self.load_image_cond_model()
-        image_cond_model = self.image_cond_model
-        if self.low_vram:
+        if camera_angle_x is None:
+            cam_angle = self.get_moge_camera_config(image)
+        else:
+            cam_angle = camera_angle_x
+            
+        if not torch.is_tensor(cam_angle):
+            cam_angle = torch.tensor([cam_angle], device=device)
+            
+        target_size = getattr(image_cond_model, 'naf_target_size', 512)
+        is_texture_stage = False
+        if isinstance(target_size, (list, tuple)):
+            is_texture_stage = any(x == 1024 for x in target_size)
+        else:
+            is_texture_stage = target_size == 1024
+
+        if self.low_vram and not is_texture_stage:
             image_cond_model.to(device)
             image_cond_model.naf_tile_factor = 4
         else:
+            if self.low_vram:
+                image_cond_model.to(device)
             image_cond_model.naf_tile_factor = 1
         
         orig_grid_res = image_cond_model.grid_resolution
