@@ -272,10 +272,13 @@ class SparseStructureFlowModel(nn.Module):
                 if isinstance(cond, dict):
                     global_cond = cond['global']
                     proj_cond = cond['proj']
-                else:
+                elif isinstance(cond, (list, tuple)) and len(cond) == 2:
                     global_cond, proj_cond = cond
+                else:
+                    global_cond = cond
+                    proj_cond = None
                 global_cond = manual_cast(global_cond, self.dtype)
-                proj_cond = manual_cast(proj_cond, self.dtype)
+                proj_cond = manual_cast(proj_cond, self.dtype) if proj_cond is not None else None
                 cond = (global_cond, proj_cond)
             elif self.image_attn_mode == 'gated_proj':
                 global_cond = manual_cast(cond['global'], self.dtype)

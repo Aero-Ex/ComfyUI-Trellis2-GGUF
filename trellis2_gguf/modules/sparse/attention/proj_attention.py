@@ -43,7 +43,18 @@ class SparseProjectAttention(nn.Module):
         global_out = self.cross_attn_block(x, global_context)
         
         if _is_sparse(proj_context):
-            proj_feats = self.proj_linear(proj_context.feats)
+            # Align proj_context coords to x coords - they may differ in ordering or device
+            device = global_out.feats.device
+            x_coords_key = x.coords[:, 1:].long().to(device)
+            proj_coords_key = proj_context.coords[:, 1:].long().to(device)
+            proj_feats_dev = proj_context.feats.to(device)
+            proj_max = int(proj_coords_key.max().item()) + 1
+            proj_flat = proj_coords_key[:, 0] * proj_max * proj_max + proj_coords_key[:, 1] * proj_max + proj_coords_key[:, 2]
+            x_flat = x_coords_key[:, 0] * proj_max * proj_max + x_coords_key[:, 1] * proj_max + x_coords_key[:, 2]
+            proj_lookup = torch.zeros(int(proj_max**3), proj_feats_dev.shape[1], device=device, dtype=proj_feats_dev.dtype)
+            proj_lookup[proj_flat] = proj_feats_dev
+            aligned_feats = proj_lookup[x_flat]
+            proj_feats = self.proj_linear(aligned_feats)
             combined_feats = proj_feats + global_out.feats
         else:
             proj_feats = self.proj_linear(proj_context)
