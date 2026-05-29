@@ -806,6 +806,9 @@ class Trellis2_GGUFMeshWithVoxelToTrimesh:
             "required": {
                 "mesh": ("MESHWITHVOXEL",),
                 "reorient_vertices":(["None","90 degrees","-90 degrees"],{"default":"90 degrees"}),
+                "rotate_x": ("FLOAT", {"default": 0.0, "min": -360.0, "max": 360.0, "step": 1.0}),
+                "rotate_y": ("FLOAT", {"default": 0.0, "min": -360.0, "max": 360.0, "step": 1.0}),
+                "rotate_z": ("FLOAT", {"default": 0.0, "min": -360.0, "max": 360.0, "step": 1.0}),
             },
         }
 
@@ -815,7 +818,7 @@ class Trellis2_GGUFMeshWithVoxelToTrimesh:
     CATEGORY = "Trellis2Wrapper (GGUF)"
     OUTPUT_NODE = True
 
-    def process(self, mesh, reorient_vertices):       
+    def process(self, mesh, reorient_vertices, rotate_x=0.0, rotate_y=0.0, rotate_z=0.0):
         mesh_copy = copy.deepcopy(mesh)
         
         vertices_np = mesh_copy.vertices.cpu().numpy()
@@ -824,6 +827,16 @@ class Trellis2_GGUFMeshWithVoxelToTrimesh:
             vertices_np[:, 1], vertices_np[:, 2] = vertices_np[:, 2], -vertices_np[:, 1]
         elif reorient_vertices == '-90 degrees':
             vertices_np[:, 1], vertices_np[:, 2] = -vertices_np[:, 2], vertices_np[:, 1]
+        
+        if rotate_x != 0.0 or rotate_y != 0.0 or rotate_z != 0.0:
+            rx, ry, rz = np.deg2rad(rotate_x), np.deg2rad(rotate_y), np.deg2rad(rotate_z)
+            cx, sx = np.cos(rx), np.sin(rx)
+            cy, sy = np.cos(ry), np.sin(ry)
+            cz, sz = np.cos(rz), np.sin(rz)
+            Rx = np.array([[1, 0, 0], [0, cx, -sx], [0, sx, cx]], dtype=vertices_np.dtype)
+            Ry = np.array([[cy, 0, sy], [0, 1, 0], [-sy, 0, cy]], dtype=vertices_np.dtype)
+            Rz = np.array([[cz, -sz, 0], [sz, cz, 0], [0, 0, 1]], dtype=vertices_np.dtype)
+            vertices_np = vertices_np @ (Rz @ Ry @ Rx).T
         
         trimesh = Trimesh.Trimesh(
             vertices=vertices_np,
@@ -2918,20 +2931,25 @@ class Trellis2_GGUFFillHolesWithMeshlib:
     CATEGORY = "Trellis2Wrapper (GGUF)"
     DESCRIPTION = "Fill all holes in a mesh using optimal triangulation."
 
-    def process(self, mesh):
+    def process(self, mesh, max_iterations=3):
         import meshlib.mrmeshpy as mrmeshpy
         
         mesh_copy = copy.deepcopy(mesh)
         mesh = mrmeshnumpy.meshFromFacesVerts(mesh_copy.faces.detach().clone().cpu().numpy(), mesh_copy.vertices.detach().clone().cpu().numpy())
         
-        hole_edges = mesh.topology.findHoleRepresentiveEdges()
         holes_filled = 0
-        
-        nb_holes = len(hole_edges)
-        print(f"{nb_holes} holes found")
-
-        if nb_holes > 0:
-            progress_bar = tqdm(total=nb_holes, desc="Filling holes")
+        # Iteratively fill holes — one pass can expose new ones
+        for iteration in range(max_iterations):
+            hole_edges = mesh.topology.findHoleRepresentiveEdges()
+            nb_holes = len(hole_edges)
+            if nb_holes == 0:
+                if iteration == 0:
+                    print("No holes found")
+                else:
+                    print(f"Mesh is watertight after {iteration} pass(es)")
+                break
+            print(f"Pass {iteration + 1}/{max_iterations}: {nb_holes} holes found")
+            progress_bar = tqdm(total=nb_holes, desc=f"Filling holes (pass {iteration + 1})")
             pbar = ProgressBar(nb_holes)
             
             last_reported_percent = -1  # Initialize at -1 to ensure 0% triggers an update
@@ -2940,6 +2958,7 @@ class Trellis2_GGUFFillHolesWithMeshlib:
                 params = mrmeshpy.FillHoleParams()
                 params.metric = mrmeshpy.getUniversalMetric(mesh)
                 mrmeshpy.fillHole(mesh, e, params)
+                holes_filled += 1
                 
                 # Calculate current progress
                 current_step = i + 1

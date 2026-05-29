@@ -440,8 +440,18 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             dict with 'cond' and 'neg_cond', each containing {'global': ..., 'proj': ...}
         """
         print('Getting Proj Image Cond ...')
-        device = self.device        
-        #image_cond_model = self.image_cond_model
+        device = self.device
+        # Use MoGe to estimate camera params from the image when available
+        try:
+            self.load_moge_model()
+            cfg = self.get_moge_camera_config(image[0] if isinstance(image, list) else image)
+            camera_angle_x = cfg['camera_angle_x']
+            distance = cfg['distance']
+            mesh_scale = cfg['mesh_scale']
+            if self.low_vram:
+                self.unload_moge_model()
+        except Exception as e:
+            print(f"[MoGe] Falling back to defaults: {e}")
         if self.low_vram:
             image_cond_model.to(device)
         cam_angle = torch.tensor([camera_angle_x], device=device)
@@ -486,6 +496,17 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         """
         print('Getting Projected Image Cond ...')
         device = self.device
+        # Use MoGe to estimate camera params from the image when available
+        try:
+            self.load_moge_model()
+            cfg = self.get_moge_camera_config(image[0] if isinstance(image, list) else image)
+            camera_angle_x = cfg['camera_angle_x']
+            distance = cfg['distance']
+            mesh_scale = cfg['mesh_scale']
+            if self.low_vram:
+                self.unload_moge_model()
+        except Exception as e:
+            print(f"[MoGe] Falling back to defaults: {e}")
         target_size = getattr(image_cond_model, 'naf_target_size', 512)
         is_texture_stage = False
         if isinstance(target_size, (list, tuple)):
@@ -769,8 +790,10 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             self.models['shape_slat_flow_model_512'] = None
             self._cleanup_cuda()
             
-    def load_tex_slat_flow_model_512(self):        
-        if self.models['tex_slat_flow_model_512'] is None:
+    def load_tex_slat_flow_model_512(self):
+        if 'tex_slat_flow_model_512' not in self._pretrained_args.get('models', {}):
+            return
+        if self.models.get('tex_slat_flow_model_512') is None:
             print('Loading Texture Slat Flow 512 model ...')
             _path = self._sdnq_remap(os.path.join(self.path, self._pretrained_args['models']['tex_slat_flow_model_512']))
             self.models['tex_slat_flow_model_512'] = models.from_pretrained(
@@ -787,7 +810,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             self.models['tex_slat_flow_model_512'].to(self._device)          
 
     def unload_tex_slat_flow_model_512(self):
-        if self.models['tex_slat_flow_model_512'] is not None:
+        if self.models.get('tex_slat_flow_model_512') is not None:
             del self.models['tex_slat_flow_model_512']
             self.models['tex_slat_flow_model_512'] = None
             self._cleanup_cuda()
@@ -1127,6 +1150,8 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         dino_lock: float = 0.0,
         dino_substeps: int = 4,
         dino_foundation_cap: float = 0.92,
+        proj_image_cond_model=None,
+        proj_images=None,
         **kwargs,
     ) -> SparseTensor:
         """
@@ -1140,7 +1165,12 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         if self.low_vram:
             cond = self._cond_to(cond, self.device)
 
-        coords_dev = coords.to(self.device)                         
+        coords_dev = coords.to(self.device)
+        # Rebuild proj cond with coords if proj model is provided
+        if proj_image_cond_model is not None and proj_images is not None:
+            grid_res = int(coords[:, 1:].max().item()) + 1
+            cond = self.get_proj_cond_shape(proj_image_cond_model, proj_images, coords,
+                                            grid_resolution_override=grid_res)
         # Sample structured latent
         noise = SparseTensor(
             feats=torch.randn(coords.shape[0], flow_model.in_channels, device=self.device),
@@ -1190,6 +1220,8 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         dino_lock: float = 0.0,
         dino_substeps: int = 4,
         dino_foundation_cap: float = 0.92,
+        proj_image_cond_model=None,
+        proj_images=None,
         **kwargs,
     ) -> SparseTensor:
         """
@@ -1270,7 +1302,19 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 hr_resolution = 512
                 break
         
-        coords_dev = coords.to(self.device)                                           
+        coords_dev = coords.to(self.device)
+
+        # Free LR proj cond memory before HR proj cond
+        if self.low_vram:
+            self._cleanup_cuda()
+        # Rebuild proj cond with HR coords if proj model is provided
+        if proj_image_cond_model is not None and proj_images is not None:
+            hr_grid_res = int(coords[:, 1:].max().item()) + 1
+            cond = self.get_proj_cond_shape(proj_image_cond_model, proj_images, coords,
+                                            grid_resolution_override=hr_grid_res)
+            if self.low_vram:
+                self._cleanup_cuda()
+
         # Sample structured latent
         noise = SparseTensor(
             feats=torch.randn(coords.shape[0], flow_model.in_channels, device=self.device),
@@ -1349,6 +1393,8 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         dino_lock: float = 0.0,
         dino_substeps: int = 4,
         dino_foundation_cap: float = 0.92,
+        proj_image_cond_model=None,
+        proj_images=None,
         **kwargs,
     ) -> SparseTensor:
         """
@@ -1360,7 +1406,13 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             sampler_params (dict): Additional parameters for the sampler.
         """
         if self.low_vram:
-            cond = self._cond_to(cond, self.device)                                                   
+            cond = self._cond_to(cond, self.device)
+        # Rebuild proj cond with shape_slat coords if proj model provided
+        if proj_image_cond_model is not None and proj_images is not None:
+            tex_coords = shape_slat.coords.cpu()
+            tex_grid_res = int(tex_coords[:, 1:].max().item()) + 1
+            cond = self.get_proj_cond_shape(proj_image_cond_model, proj_images, tex_coords,
+                                            grid_resolution_override=tex_grid_res)
         # Sample structured latent
         std = torch.tensor(self.shape_slat_normalization['std'])[None].to(shape_slat.device)
         mean = torch.tensor(self.shape_slat_normalization['mean'])[None].to(shape_slat.device)
@@ -1587,10 +1639,20 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             
         seed_all(seed)
         
+        # Load sparse structure model early so we can check image_attn_mode
+        self.load_sparse_structure_model()
+        ss_model = self.models['sparse_structure_flow_model']
+        ss_attn_mode = getattr(ss_model, 'image_attn_mode', None)
+
         # Get Image Cond
-        self.load_image_cond_model()        
-        # Multi-view conditioning happens inside get_cond()              
-        cond_512  = self.get_cond(images, 512, max_views = max_views)        
+        self.load_image_cond_model()
+        # Use proj conditioning if sparse structure model requires it
+        if ss_attn_mode == 'proj':
+            proj_cond_model = self.load_pixal3d_image_cond_ss()
+            cond_512 = self.get_proj_cond_ss(images, image_cond_model=proj_cond_model)
+        else:
+            # Multi-view conditioning happens inside get_cond()
+            cond_512 = self.get_cond(images, 512, max_views = max_views)
         cond_1024 = self.get_cond(images, 1024, max_views = max_views) if pipeline_type != '512' else None
         
         if pbar is not None:
@@ -1616,13 +1678,31 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             self.unload_sparse_structure_model()
         
         # Sampling Shape
+        # Build proj conds for shape/tex stages if needed (Pixal3D models require proj conditioning)
+        shape_512_model = None
+        shape_1024_model = None
+        tex_1024_model = None
+        if ss_attn_mode == 'proj':
+            # coords are in sparse_structure_resolution space; proj grid must match
+            coords_grid_res = int(coords[:, 1:].max().item()) + 1
+            shape_512_model = self.load_pixal3d_image_cond_shape_512()
+            cond_512 = self.get_proj_cond_shape(shape_512_model, images, coords,
+                                                grid_resolution_override=coords_grid_res)
+            if pipeline_type != '512':
+                shape_1024_model = self.load_pixal3d_image_cond_shape_1024()
+                cond_1024 = self.get_proj_cond_shape(shape_1024_model, images, coords,
+                                                     grid_resolution_override=coords_grid_res)
+                tex_1024_model = self.load_pixal3d_image_cond_tex_1024()
+
         if pipeline_type == '512':            
             self.unload_shape_slat_flow_model_1024()
             self.load_shape_slat_flow_model_512()            
             shape_slat = self.sample_shape_slat(
                 cond_512, self.models['shape_slat_flow_model_512'],
                 coords, shape_slat_sampler_params,
-                sampler=shape_sampler or sampler
+                sampler=shape_sampler or sampler,
+                proj_image_cond_model=shape_512_model if ss_attn_mode == 'proj' else None,
+                proj_images=images if ss_attn_mode == 'proj' else None,
             )
             
             if pbar is not None:
@@ -1637,7 +1717,9 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 tex_slat = self.sample_tex_slat(
                     cond_512, self.models['tex_slat_flow_model_512'],
                     shape_slat, tex_slat_sampler_params,
-                    sampler=tex_sampler or sampler
+                    sampler=tex_sampler or sampler,
+                    proj_image_cond_model=shape_512_model if ss_attn_mode == 'proj' else None,
+                    proj_images=images if ss_attn_mode == 'proj' else None,
                 )
                 
                 if pbar is not None:
@@ -1653,7 +1735,9 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             shape_slat = self.sample_shape_slat(
                 cond_1024, self.models['shape_slat_flow_model_1024'],
                 coords, shape_slat_sampler_params,
-                sampler=shape_sampler or sampler
+                sampler=shape_sampler or sampler,
+                proj_image_cond_model=shape_1024_model if ss_attn_mode == 'proj' else None,
+                proj_images=images if ss_attn_mode == 'proj' else None,
             )
             
             if pbar is not None:
@@ -1667,7 +1751,9 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 self.load_tex_slat_flow_model_1024()
                 tex_slat = self.sample_tex_slat(
                     cond_1024, self.models['tex_slat_flow_model_1024'],
-                    shape_slat, tex_slat_sampler_params, sampler=tex_sampler or sampler
+                    shape_slat, tex_slat_sampler_params, sampler=tex_sampler or sampler,
+                    proj_image_cond_model=tex_1024_model if ss_attn_mode == 'proj' else None,
+                    proj_images=images if ss_attn_mode == 'proj' else None,
                 )
                 
                 if pbar is not None:
@@ -1686,7 +1772,9 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 512, 1024,
                 coords, shape_slat_sampler_params,
                 max_num_tokens,
-                sampler=shape_sampler or sampler
+                sampler=shape_sampler or sampler,
+                proj_image_cond_model=shape_1024_model if ss_attn_mode == 'proj' else None,
+                proj_images=images if ss_attn_mode == 'proj' else None,
             )
             
             if pbar is not None:
@@ -1695,13 +1783,21 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             if not self.keep_models_loaded:
                 self.unload_shape_slat_flow_model_512()
                 self.unload_shape_slat_flow_model_1024()
-            
+            # Free VRAM before texture stage
+            if ss_attn_mode == 'proj' and self.low_vram:
+                self.unload_pixal3d_image_cond_ss()
+                self.unload_pixal3d_image_cond_shape_512()
+                self.unload_pixal3d_image_cond_shape_1024()
+                self._cleanup_cuda()
+
             if generate_texture_slat:
                 self.unload_tex_slat_flow_model_512()
                 self.load_tex_slat_flow_model_1024()
                 tex_slat = self.sample_tex_slat(
                     cond_1024, self.models['tex_slat_flow_model_1024'],
-                    shape_slat, tex_slat_sampler_params, sampler=tex_sampler or sampler
+                    shape_slat, tex_slat_sampler_params, sampler=tex_sampler or sampler,
+                    proj_image_cond_model=tex_1024_model if ss_attn_mode == 'proj' else None,
+                    proj_images=images if ss_attn_mode == 'proj' else None,
                 )
                 
             if pbar is not None:
@@ -1718,7 +1814,9 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 512, 2048,
                 coords, shape_slat_sampler_params,
                 max_num_tokens,
-                sampler=shape_sampler or sampler
+                sampler=shape_sampler or sampler,
+                proj_image_cond_model=shape_1024_model if ss_attn_mode == 'proj' else None,
+                proj_images=images if ss_attn_mode == 'proj' else None,
             )
             
             if pbar is not None:
@@ -1733,7 +1831,9 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 self.load_tex_slat_flow_model_1024()
                 tex_slat = self.sample_tex_slat(
                     cond_1024, self.models['tex_slat_flow_model_1024'],
-                    shape_slat, tex_slat_sampler_params, sampler=tex_sampler or sampler
+                    shape_slat, tex_slat_sampler_params, sampler=tex_sampler or sampler,
+                    proj_image_cond_model=tex_1024_model if ss_attn_mode == 'proj' else None,
+                    proj_images=images if ss_attn_mode == 'proj' else None,
                 )
                 
                 if pbar is not None:
@@ -1750,7 +1850,9 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 512, 4096,
                 coords, shape_slat_sampler_params,
                 max_num_tokens,
-                sampler=shape_sampler or sampler
+                sampler=shape_sampler or sampler,
+                proj_image_cond_model=shape_1024_model if ss_attn_mode == 'proj' else None,
+                proj_images=images if ss_attn_mode == 'proj' else None,
             )
             
             if pbar is not None:
@@ -1765,7 +1867,9 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 self.load_tex_slat_flow_model_1024()
                 tex_slat = self.sample_tex_slat(
                     cond_1024, self.models['tex_slat_flow_model_1024'],
-                    shape_slat, tex_slat_sampler_params, sampler=tex_sampler or sampler
+                    shape_slat, tex_slat_sampler_params, sampler=tex_sampler or sampler,
+                    proj_image_cond_model=tex_1024_model if ss_attn_mode == 'proj' else None,
+                    proj_images=images if ss_attn_mode == 'proj' else None,
                 )
                         
                 if pbar is not None:
@@ -1782,7 +1886,9 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 512, 1536,
                 coords, shape_slat_sampler_params,
                 max_num_tokens,
-                sampler=shape_sampler or sampler
+                sampler=shape_sampler or sampler,
+                proj_image_cond_model=shape_1024_model if ss_attn_mode == 'proj' else None,
+                proj_images=images if ss_attn_mode == 'proj' else None,
             )
             
             if pbar is not None:
@@ -1797,7 +1903,9 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 self.load_tex_slat_flow_model_1024()
                 tex_slat = self.sample_tex_slat(
                     cond_1024, self.models['tex_slat_flow_model_1024'],
-                    shape_slat, tex_slat_sampler_params, sampler=tex_sampler or sampler
+                    shape_slat, tex_slat_sampler_params, sampler=tex_sampler or sampler,
+                    proj_image_cond_model=tex_1024_model if ss_attn_mode == 'proj' else None,
+                    proj_images=images if ss_attn_mode == 'proj' else None,
                 )
                 
                 if pbar is not None:
@@ -1806,6 +1914,12 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             if not self.keep_models_loaded:
                 self.unload_tex_slat_flow_model_1024()               
             
+        # Clean up proj cond models when not keeping loaded
+        if not self.keep_models_loaded and ss_attn_mode == 'proj':
+            self.unload_pixal3d_image_cond_ss()
+            self.unload_pixal3d_image_cond_shape_512()
+            self.unload_pixal3d_image_cond_shape_1024()
+            self.unload_pixal3d_image_cond_tex_1024()
         torch.cuda.empty_cache()
         if generate_texture_slat:
             out_mesh = self.decode_latent(shape_slat, tex_slat, res, use_tiled=use_tiled)
@@ -2567,7 +2681,13 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             sampler_params (dict): Additional parameters for the sampler.
         """
         if self.low_vram:
-            cond = self._cond_to(cond, self.device)                                                   
+            cond = self._cond_to(cond, self.device)
+        # Rebuild proj cond with shape_slat coords if proj model provided
+        if proj_image_cond_model is not None and proj_images is not None:
+            tex_coords = shape_slat.coords.cpu()
+            tex_grid_res = int(tex_coords[:, 1:].max().item()) + 1
+            cond = self.get_proj_cond_shape(proj_image_cond_model, proj_images, tex_coords,
+                                            grid_resolution_override=tex_grid_res)
         # Sample structured latent
         std = torch.tensor(self.shape_slat_normalization['std'])[None].to(shape_slat.device)
         mean = torch.tensor(self.shape_slat_normalization['mean'])[None].to(shape_slat.device)
@@ -2637,10 +2757,20 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             
         seed_all(seed)
         
+        # Load sparse structure model early so we can check image_attn_mode
+        self.load_sparse_structure_model()
+        ss_model = self.models['sparse_structure_flow_model']
+        ss_attn_mode = getattr(ss_model, 'image_attn_mode', None)
+
         # Get Image Cond
-        self.load_image_cond_model()        
-        # Multi-view conditioning happens inside get_cond()              
-        cond_512  = self.get_cond(images, 512, max_views = max_views)        
+        self.load_image_cond_model()
+        # Use proj conditioning if sparse structure model requires it
+        if ss_attn_mode == 'proj':
+            proj_cond_model = self.load_pixal3d_image_cond_ss()
+            cond_512 = self.get_proj_cond_ss(images, image_cond_model=proj_cond_model)
+        else:
+            # Multi-view conditioning happens inside get_cond()
+            cond_512 = self.get_cond(images, 512, max_views = max_views)
         cond_1024 = self.get_cond(images, 1024, max_views = max_views) if pipeline_type != '512' else None
         
         if pbar is not None:
