@@ -2670,7 +2670,10 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         verbose: bool = False,
         dino_lock: float = 0.0,
         dino_substeps: int = 4,
-        dino_foundation_cap: float = 0.92
+        dino_foundation_cap: float = 0.92,
+        proj_image_cond_model=None,
+        proj_images=None,
+        **kwargs,
     ) -> SparseTensor:
         """
         Sample structured latent with the given conditioning.
