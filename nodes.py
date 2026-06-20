@@ -20,6 +20,21 @@ import hashlib
 import cv2
 import gc
 import copy
+class TolerantList(list):
+    def __contains__(self, item):
+        if super().__contains__(item):
+            return True
+        if isinstance(item, int):
+            if super().__contains__(str(item)):
+                return True
+        elif isinstance(item, str):
+            try:
+                if super().__contains__(int(item)):
+                    return True
+            except ValueError:
+                pass
+        return False
+
 
 import pymeshlab
 
@@ -2213,7 +2228,7 @@ class Trellis2_GGUFReconstructMesh:
             "required": {
                 "mesh": ("MESHWITHVOXEL",),
                 "remesh_band": ("FLOAT",{"default":1.0}),
-                "resolution": ([128,256,512,1024,2048],{"default":512}),             
+                "resolution": (TolerantList(["128","256","512","1024","2048"]),{"default":"512"}),             
             }
         }
 
@@ -2224,6 +2239,7 @@ class Trellis2_GGUFReconstructMesh:
     OUTPUT_NODE = True
 
     def process(self, mesh, remesh_band, resolution):
+        resolution = int(resolution)
         CUDAUtils.reset()
         
         mesh_copy = copy.deepcopy(mesh)
@@ -2249,7 +2265,7 @@ class Trellis2_GGUFReconstructMeshWithQuad:
             "required": {
                 "mesh": ("MESHWITHVOXEL",),
                 "remesh_band": ("FLOAT",{"default":1.0}),
-                "resolution": ([128,256,512,1024,2048],{"default":512}),
+                "resolution": (TolerantList(["128","256","512","1024","2048"]),{"default":"512"}),
                 "remove_floaters": ("BOOLEAN",{"default":True}),
                 "remove_inner_faces": ("BOOLEAN",{"default":False}),                  
             }
@@ -2262,6 +2278,7 @@ class Trellis2_GGUFReconstructMeshWithQuad:
     OUTPUT_NODE = True
 
     def process(self, mesh, remesh_band, resolution, remove_floaters, remove_inner_faces):
+        resolution = int(resolution)
         CUDAUtils.reset()
         
         mesh_copy = copy.deepcopy(mesh)
@@ -2304,7 +2321,7 @@ class Trellis2_GGUFMeshTexturing:
                 "texture_guidance_strength": ("FLOAT",{"default":3.00,"min":0.00,"max":99.99,"step":0.01}),
                 "texture_guidance_rescale": ("FLOAT",{"default":0.20,"min":0.00,"max":1.00,"step":0.01}),
                 "texture_rescale_t": ("FLOAT",{"default":3.00,"min":0.00,"max":9.99,"step":0.01}), 
-                "resolution": ([512,1024,1536],{"default":1024}),
+                "resolution": (TolerantList(["512","1024","1536"]),{"default":"1024"}),
                 "texture_size": ("INT",{"default":4096,"min":512,"max":16384}),
                 "texture_alpha_mode": (["OPAQUE","MASK","BLEND"],{"default":"OPAQUE"}),
                 "double_side_material": ("BOOLEAN",{"default":False}), 
@@ -2332,6 +2349,7 @@ class Trellis2_GGUFMeshTexturing:
     OUTPUT_NODE = True
 
     def process(self, pipeline, image, trimesh, seed, texture_steps, texture_guidance_strength, texture_guidance_rescale, texture_rescale_t, resolution, texture_size, texture_alpha_mode, double_side_material, texture_guidance_interval_start, texture_guidance_interval_end, max_views,bake_on_vertices,use_custom_normals,uv_unwrap_method,mesh_cluster_threshold_cone_half_angle_rad, sampler="euler", use_tiled_encoder=False, encoder_tile_size=512, encoder_overlap=24, use_tiled_decoder_for_texture=False, decoder_tile_size=120, decoder_overlap=48):
+        resolution = int(resolution)
         images = ImageUtils.tensor_batch_to_pil_list(image, max_views=max_views)
         image_in = images[0] if len(images) == 1 else images
 
@@ -2381,7 +2399,7 @@ class Trellis2_GGUFMeshTexturingMultiView:
                 "texture_guidance_strength": ("FLOAT",{"default":3.00,"min":0.00,"max":99.99,"step":0.01}),
                 "texture_guidance_rescale": ("FLOAT",{"default":0.20,"min":0.00,"max":1.00,"step":0.01}),
                 "texture_rescale_t": ("FLOAT",{"default":3.00,"min":0.00,"max":9.99,"step":0.01}), 
-                "resolution": ([512,1024,1536],{"default":1024}),
+                "resolution": (TolerantList(["512","1024","1536"]),{"default":"1024"}),
                 "texture_size": ("INT",{"default":4096,"min":512,"max":16384}),
                 "texture_alpha_mode": (["OPAQUE","MASK","BLEND"],{"default":"OPAQUE"}),
                 "double_side_material": ("BOOLEAN",{"default":False}), 
@@ -2444,6 +2462,7 @@ class Trellis2_GGUFMeshTexturingMultiView:
         decoder_tile_size=120,
         decoder_overlap=48):
         
+        resolution = int(resolution)
         CUDAUtils.reset()
         
         # Convert front image tensor to PIL
@@ -2609,7 +2628,7 @@ class Trellis2_GGUFMeshRefiner:
                 "trimesh": ("TRIMESH",),
                 "image": ("IMAGE",),
                 "seed": ("INT", {"default": 12345, "min": 0, "max": 0x7fffffff}),
-                "resolution": ([512,1024,1536],{"default":1024}),
+                "resolution": (TolerantList(["512","1024","1536"]),{"default":"1024"}),
                 "shape_steps": ("INT",{"default":12, "min":1, "max":100},),
                 "shape_guidance_strength": ("FLOAT",{"default":6.50,"min":0.00,"max":99.99,"step":0.01}),
                 "shape_guidance_rescale": ("FLOAT",{"default":0.05,"min":0.00,"max":1.00,"step":0.01}),
@@ -2620,7 +2639,7 @@ class Trellis2_GGUFMeshRefiner:
                 "texture_rescale_t": ("FLOAT",{"default":3.00,"min":0.00,"max":9.99,"step":0.01}),               
                 "max_num_tokens": ("INT",{"default":999999,"min":0,"max":999999}),
                 "generate_texture_slat": ("BOOLEAN", {"default":True}),
-                "downsampling":([16,32,64],{"default":16}),
+                "downsampling":(TolerantList(["16","32","64"]),{"default":"16"}),
                 "shape_guidance_interval_start": ("FLOAT",{"default":0.10,"min":0.00,"max":1.00,"step":0.01}),
                 "shape_guidance_interval_end": ("FLOAT",{"default":1.00,"min":0.00,"max":1.00,"step":0.01}),
                 "texture_guidance_interval_start": ("FLOAT",{"default":0.00,"min":0.00,"max":1.00,"step":0.01}),
@@ -2671,6 +2690,8 @@ class Trellis2_GGUFMeshRefiner:
         upsample_tile_size=16,
         upsample_overlap=2):
 
+        resolution = int(resolution)
+        downsampling = int(downsampling)
         CUDAUtils.reset()
 
         images = ImageUtils.tensor_batch_to_pil_list(image, max_views=max_views)
@@ -2779,8 +2800,8 @@ class Trellis2_GGUFOvoxelExportToGLB:
         return {
             "required": {
                 "mesh": ("MESHWITHVOXEL",),
-                "resolution": ([512,1024],{"default":1024}),
-                "texture_size": ([512,1024,2048,4096],{"default":2048}),
+                "resolution": (TolerantList(["512","1024"]),{"default":"1024"}),
+                "texture_size": (TolerantList(["512","1024","2048","4096"]),{"default":"2048"}),
                 "target_face_num": ("INT",{"default":2000000,"min":500,"max":16000000}),
             },
         }
@@ -2792,6 +2813,8 @@ class Trellis2_GGUFOvoxelExportToGLB:
     OUTPUT_NODE = True
 
     def process(self, mesh, resolution, texture_size, target_face_num):
+        resolution = int(resolution)
+        texture_size = int(texture_size)
         mesh_copy = copy.deepcopy(mesh)
 
         glb = o_voxel.postprocess.to_glb(
@@ -2818,7 +2841,7 @@ class Trellis2_GGUFTrimeshToMeshWithVoxel:
         return {
             "required": {
                 "trimesh": ("TRIMESH",),
-                "resolution": ([512,1024],{"default":1024}),
+                "resolution": (TolerantList(["512","1024"]),{"default":"1024"}),
             },
         }
 
@@ -2829,6 +2852,7 @@ class Trellis2_GGUFTrimeshToMeshWithVoxel:
     OUTPUT_NODE = True
 
     def process(self, trimesh, resolution):       
+        resolution = int(resolution)
         mesh_copy = trimesh.copy()
         
         mvoxel = self.get_voxelmesh_from_trimesh(mesh_copy, resolution)
