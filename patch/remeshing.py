@@ -486,6 +486,7 @@ def remesh_narrow_band_dc(
 
     # --- 4. Dual Contouring Kernels ---
     Nvox = coords.shape[0]
+    hashmap_vox = _init_hashmap(resolution, 2 * Nvox, device)
     coords_4d = torch.zeros((coords.shape[0], 4), dtype=coords.dtype, device=device)
     coords_4d[:, 1:] = coords
     _C.hashmap_insert_3d_idx_as_val_cuda(*hashmap_vox, coords_4d, resolution, resolution, resolution)
@@ -497,6 +498,7 @@ def remesh_narrow_band_dc(
     dist_vert, _, _ = chunked_udf(bvh, pts_vert)
     grid_verts_4d = torch.zeros((grid_verts.shape[0], 4), dtype=grid_verts.dtype, device=device)
     grid_verts_4d[:, 1:] = grid_verts
+    hashmap_vert = _init_hashmap(resolution + 1, 2 * grid_verts.shape[0], device)
     _C.hashmap_insert_3d_idx_as_val_cuda(*hashmap_vert, grid_verts_4d, resolution+1, resolution+1, resolution+1)
     del grid_verts_4d
     torch.cuda.empty_cache()
