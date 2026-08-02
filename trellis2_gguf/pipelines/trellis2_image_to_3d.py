@@ -3329,19 +3329,25 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             self.unload_tex_slat_flow_model_512()
             self.load_tex_slat_flow_model_1024()
             tex_model = self.models['tex_slat_flow_model_1024']
-            
+            tex_attn_mode = getattr(tex_model, 'image_attn_mode', None)
+            tex_1024_model = self.load_pixal3d_image_cond_tex_1024() if tex_attn_mode == 'proj' else None
+
             tex_slat = self.sample_tex_slat(
                 cond, tex_model,
-                shape_slat, tex_slat_sampler_params, sampler=sampler
+                shape_slat, tex_slat_sampler_params, sampler=sampler,
+                proj_image_cond_model=tex_1024_model,
+                proj_images=images if tex_attn_mode == 'proj' else None,
             )
-            
+
             if not self.keep_models_loaded:
                 self.unload_tex_slat_flow_model_1024()
+                if tex_attn_mode == 'proj':
+                    self.unload_pixal3d_image_cond_tex_1024()
 
         torch.cuda.empty_cache()
         pbr_voxel = self.decode_tex_slat(tex_slat)
         torch.cuda.empty_cache()
-        
+
         out_mesh, baseColorTexture, metallicRoughnessTexture = self.postprocess_mesh(mesh, pbr_voxel, resolution, texture_size, texture_alpha_mode, double_side_material, bake_on_vertices, use_custom_normals, uv_unwrap_method, mesh_cluster_threshold_cone_half_angle_rad, inpainting)
         return out_mesh, baseColorTexture, metallicRoughnessTexture
         
