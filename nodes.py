@@ -10,6 +10,7 @@ import trimesh as Trimesh
 from tqdm import tqdm
 import time
 import shutil
+import subprocess
 import uuid
 import triton
 import triton.compiler
@@ -3153,6 +3154,194 @@ class Trellis2_GGUFRemeshWithQuad:
                 
         return (mesh_copy,)   
 
+class Trellis2_GGUFAutoRemesher:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "target_quads": ("INT", {"default": 50000, "min": 100, "max": 2000000, "step": 1000}),
+                "edge_scaling": ("FLOAT", {"default": 1.0, "min": 1.0, "max": 4.0, "step": 0.1}),
+                "sharp_edge": ("FLOAT", {"default": 90.0, "min": 30.0, "max": 180.0, "step": 1.0}),
+                "smooth_normal": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 180.0, "step": 1.0}),
+                "adaptivity": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.05}),
+                "anisotropy": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.05}),
+                "autoremesher_path": ("STRING", {"default": "/home/aero/autoremesher-1.1.0.AppImage", "tooltip": "Path to AutoRemesher AppImage executable"}),
+                "save_output": ("BOOLEAN", {"default": True, "tooltip": "Save remeshed OBJ to ComfyUI output directory"}),
+                "filename_prefix": ("STRING", {"default": "3D/autoremeshed", "tooltip": "Subfolder / filename prefix for output file"}),
+                "voxel_resolution": (TolerantList(["512", "1024", "2048"]), {"default": "1024", "tooltip": "Voxel resolution for output MeshWithVoxel"}),
+            },
+            "optional": {
+                "trimesh": ("TRIMESH",),
+                "mesh_with_voxel": ("MESHWITHVOXEL",),
+                "filepath": ("STRING", {"default": "", "tooltip": "Filepath to .obj/.glb mesh (absolute or relative to input/output dir)"}),
+            }
+        }
+
+    RETURN_TYPES = ("TRIMESH", "MESHWITHVOXEL", "STRING", "STRING")
+    RETURN_NAMES = ("trimesh", "mesh_with_voxel", "output_path", "stats")
+    FUNCTION = "process"
+    CATEGORY = "Trellis2Wrapper (GGUF)"
+    OUTPUT_NODE = True
+    DESCRIPTION = "Automatic quad remeshing using AutoRemesher AppImage."
+
+    def process(
+        self,
+        target_quads,
+        edge_scaling,
+        sharp_edge,
+        smooth_normal,
+        adaptivity,
+        anisotropy,
+        autoremesher_path,
+        save_output,
+        filename_prefix,
+        voxel_resolution,
+        trimesh=None,
+        mesh_with_voxel=None,
+        filepath=""
+    ):
+        CUDAUtils.reset()
+        
+        # 1. Verify executable exists
+        if not os.path.exists(autoremesher_path):
+            raise FileNotFoundError(f"AutoRemesher executable not found at: {autoremesher_path}")
+        
+        # 2. Extract or load input mesh as Trimesh
+        input_trimesh = None
+        if trimesh is not None:
+            input_trimesh = trimesh.copy() if hasattr(trimesh, 'copy') else trimesh
+        elif mesh_with_voxel is not None:
+            v = mesh_with_voxel.vertices.detach().cpu().numpy() if isinstance(mesh_with_voxel.vertices, torch.Tensor) else np.asarray(mesh_with_voxel.vertices)
+            f = mesh_with_voxel.faces.detach().cpu().numpy() if isinstance(mesh_with_voxel.faces, torch.Tensor) else np.asarray(mesh_with_voxel.faces)
+            input_trimesh = Trimesh.Trimesh(vertices=v, faces=f, process=False)
+        elif filepath and filepath.strip():
+            target_path = filepath.strip()
+            if not os.path.exists(target_path):
+                in_cand = os.path.join(folder_paths.get_input_directory(), target_path)
+                out_cand = os.path.join(folder_paths.get_output_directory(), target_path)
+                if os.path.exists(in_cand):
+                    target_path = in_cand
+                elif os.path.exists(out_cand):
+                    target_path = out_cand
+                else:
+                    raise FileNotFoundError(f"Mesh file not found at '{filepath}' or in ComfyUI input/output directories.")
+            input_trimesh = Trimesh.load(target_path, force="mesh")
+        else:
+            raise ValueError("AutoRemesher requires either 'trimesh', 'mesh_with_voxel', or 'filepath' input.")
+
+        # Ensure temp directory
+        temp_dir = folder_paths.get_temp_directory()
+        os.makedirs(temp_dir, exist_ok=True)
+        session_id = uuid.uuid4().hex[:8]
+        temp_in_obj = os.path.join(temp_dir, f"autoremesh_in_{session_id}.obj")
+        temp_report_path = os.path.join(temp_dir, f"autoremesh_report_{session_id}.txt")
+
+        # Export input mesh to temporary obj
+        input_trimesh.export(temp_in_obj, file_type="obj")
+
+        # 3. Determine output path
+        if save_output:
+            full_output_folder, filename, counter, subfolder, filename_prefix = folder_paths.get_save_image_path(
+                filename_prefix, folder_paths.get_output_directory()
+            )
+            os.makedirs(full_output_folder, exist_ok=True)
+            output_obj_path = os.path.join(full_output_folder, f"{filename}_{counter:05}_.obj")
+        else:
+            output_obj_path = os.path.join(temp_dir, f"autoremesh_out_{session_id}.obj")
+
+        # 4. Prepare command and execute
+        cmd = [
+            autoremesher_path,
+            "-i", temp_in_obj,
+            "-o", output_obj_path,
+            "--report", temp_report_path,
+            "--target-quads", str(int(target_quads)),
+            "--edge-scaling", str(float(edge_scaling)),
+            "--sharp-edge", str(float(sharp_edge)),
+            "--smooth-normal", str(float(smooth_normal)),
+            "--adaptivity", str(float(adaptivity)),
+            "--anisotropy", str(float(anisotropy)),
+        ]
+
+        env = os.environ.copy()
+        # Clean up OpenCV / Python Qt overrides so the AppImage uses its internal Qt plugins
+        env.pop("QT_QPA_PLATFORM_PLUGIN_PATH", None)
+        env.pop("QT_PLUGIN_PATH", None)
+        env.pop("QT_QPA_PLATFORM", None)
+
+        run_cmd = cmd
+        if "DISPLAY" not in env or not env["DISPLAY"]:
+            if shutil.which("xvfb-run"):
+                run_cmd = ["xvfb-run", "-a"] + cmd
+
+        try:
+            result = subprocess.run(run_cmd, env=env, capture_output=True, text=True, check=True)
+        except subprocess.CalledProcessError as e:
+            err_msg = f"AutoRemesher failed (exit {e.returncode}):\n{e.stderr}\n{e.stdout}"
+            raise RuntimeError(err_msg) from e
+        finally:
+            if os.path.exists(temp_in_obj):
+                try:
+                    os.remove(temp_in_obj)
+                except Exception:
+                    pass
+
+        # 5. Read report
+        stats_text = ""
+        if os.path.exists(temp_report_path):
+            try:
+                with open(temp_report_path, "r", encoding="utf-8") as rf:
+                    stats_text = rf.read().strip()
+                os.remove(temp_report_path)
+            except Exception:
+                pass
+        if not stats_text and result.stdout:
+            stats_text = result.stdout.strip()
+
+        # 6. Load remeshed Trimesh
+        if not os.path.exists(output_obj_path):
+            raise FileNotFoundError(f"AutoRemesher finished but output file was not found at {output_obj_path}")
+
+        remeshed_trimesh = Trimesh.load(output_obj_path, force="mesh")
+
+        # 7. Convert to MeshWithVoxel
+        resolution = int(voxel_resolution)
+        v_tensor = torch.from_numpy(remeshed_trimesh.vertices).float()
+        f_tensor = torch.from_numpy(remeshed_trimesh.faces).long()
+
+        voxel_indices, dual_vertices, intersected = o_voxel.convert.mesh_to_flexible_dual_grid(
+            v_tensor.cpu(), f_tensor.cpu(),
+            grid_size=resolution,
+            aabb=[[-0.5,-0.5,-0.5],[0.5,0.5,0.5]],
+            face_weight=1.0,
+            boundary_weight=0.2,
+            regularization_weight=1e-2,
+            timing=False,
+        )
+
+        coords = torch.cat([torch.zeros_like(voxel_indices[:, 0:1]), voxel_indices], dim=-1).cpu()
+        del voxel_indices, dual_vertices, intersected
+        gc.collect()
+
+        pbr_attr_layout = {
+            'base_color': slice(0, 3),
+            'metallic': slice(3, 4),
+            'roughness': slice(4, 5),
+            'alpha': slice(5, 6),
+        }
+
+        remeshed_mesh_with_voxel = MeshWithVoxel(
+            v_tensor, f_tensor,
+            origin=[-0.5, -0.5, -0.5],
+            voxel_size=1 / resolution,
+            coords=coords,
+            attrs=None,
+            voxel_shape=None,
+            layout=pbr_attr_layout
+        )
+
+        return (remeshed_trimesh, remeshed_mesh_with_voxel, str(output_obj_path), stats_text)
+
 class Trellis2_GGUFBatchSimplifyMeshAndExport:
     @classmethod
     def INPUT_TYPES(s):
@@ -3948,6 +4137,7 @@ NODE_CLASS_MAPPINGS = {
     "Trellis2DecodeLatents_GGUF": Trellis2_GGUFDecodeLatents,
     "Trellis2SimplifyMeshAdvanced_GGUF": Trellis2_GGUFSimplifyMeshAdvanced,
     "Trellis2SimplifyTrimeshAdvanced_GGUF": Trellis2_GGUFSimplifyTrimeshAdvanced,
+    "Trellis2AutoRemesher_GGUF": Trellis2_GGUFAutoRemesher,
     }
     
 
@@ -3997,4 +4187,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Trellis2DecodeLatents_GGUF": "Trellis2 - Decode Latents (GGUF)",
     "Trellis2SimplifyMeshAdvanced_GGUF": "Trellis2 - Simplify Mesh Advanced (GGUF)",
     "Trellis2SimplifyTrimeshAdvanced_GGUF": "Trellis2 - Simplify Trimesh Advanced (GGUF)",
+    "Trellis2AutoRemesher_GGUF": "Trellis2 - AutoRemesher (Quad Remesh)",
     }

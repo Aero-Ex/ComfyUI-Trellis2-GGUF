@@ -12,3 +12,6 @@ nvdiffrec/*
 venv/
 test_*.py
 debug_*.py
+SkinTokens/
+docs/
+skintokens_blender/
